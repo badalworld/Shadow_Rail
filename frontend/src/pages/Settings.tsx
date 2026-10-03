@@ -57,10 +57,17 @@ export const Settings: React.FC = () => {
       delete body.binance.has_secret
       delete body.binance.api_key_len
       delete body.risk.active_system
-      await endpoints.saveConfig(body)
+      const res = await endpoints.saveConfig(body)
       setApiKey(''); setApiSecret('')
       await load(); refresh()
-      pushToast({ kind: 'success', title: 'Settings saved', body: 'Engine hot-reloaded with the new configuration' })
+      const ignored: string[] = res?.unknown || []
+      pushToast({
+        kind: ignored.length ? 'warn' : 'success',
+        title: ignored.length ? 'Saved with warnings' : 'Settings saved',
+        body: ignored.length
+          ? `The engine ignored ${ignored.length} field(s): ${ignored.slice(0, 4).join(', ')}`
+          : 'Engine hot-reloaded with the new configuration',
+      })
     } catch (e: any) {
       pushToast({ kind: 'error', title: 'Save failed', body: String(e?.message || e) })
     } finally { setSaving(false) }
@@ -87,13 +94,16 @@ export const Settings: React.FC = () => {
 
   const verifyIp = async () => {
     try {
-      const res = await endpoints.verifyIp({})
+      const res = await endpoints.verifyIp({
+        ip_whitelist: cfg?.binance?.ip_whitelist || ip?.public_ip || '',
+      })
       setIp((p: any) => ({ ...p, whitelist_confirmed: res.whitelisted_ok }))
       pushToast({
         kind: res.whitelisted_ok ? 'success' : 'warn',
         title: res.whitelisted_ok ? 'IP whitelist confirmed' : 'IP not confirmed yet',
         body: res.message || `Add ${ip?.public_ip} to your Binance API restrictions`,
       })
+      await load()
     } catch (e: any) {
       pushToast({ kind: 'error', title: 'Verification failed', body: String(e?.message || e) })
     }
@@ -246,6 +256,25 @@ export const Settings: React.FC = () => {
                     </button>
                   </div>
                   <div className="mt-1 text-[0.62rem] dim">hostname: <span className="mono">{ip?.hostname}</span></div>
+                  <label className="mt-3 block">
+                    <span className="text-[0.58rem] uppercase tracking-wider dim">
+                      IP restricted on the Binance key
+                    </span>
+                    <input
+                      className="mt-1 w-full rounded-lg border bg-transparent px-2 py-1.5 mono text-[0.72rem] outline-none"
+                      style={{ borderColor: 'var(--sr-border)' }}
+                      placeholder={ip?.public_ip || '203.0.113.10'}
+                      value={cfg?.binance?.ip_whitelist ?? ''}
+                      onChange={(e) => patch('binance', 'ip_whitelist', e.target.value)}
+                      onFocus={(e) => {
+                        if (!e.target.value && ip?.public_ip) patch('binance', 'ip_whitelist', ip.public_ip)
+                      }}
+                    />
+                  </label>
+                  <div className="mt-1 text-[0.6rem] dim">
+                    Saved with your keys. Use the exact string you pasted into Binance —
+                    it may be a CIDR range or a comma-separated list.
+                  </div>
                   <div className="mt-2">
                     <Chip color={ip?.whitelist_confirmed ? 'var(--color-bull)' : 'var(--color-amber)'}>
                       {ip?.whitelist_confirmed ? 'whitelist confirmed' : 'whitelist not confirmed'}

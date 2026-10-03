@@ -110,6 +110,11 @@ class Proposal:
         }
 
 
+# the seven stages the dashboard renders, in order — every one is always present
+WORKFLOW_STAGES = ("connector", "scan", "analyze", "execute", "verify",
+                   "monitor", "close")
+
+
 class TradingEngine:
     def __init__(self, store: ConfigStore = STORE, hub: MarketHub | None = None,
                  journal: Journal = JOURNAL, registry: BotRegistry | None = None):
@@ -138,7 +143,10 @@ class TradingEngine:
         self.sos: dict[str, Any] = {"active": False, "level": "none", "reasons": [],
                                     "since": 0, "checks": 0, "last_ok": 0}
         self.health: dict[str, Any] = {"connected": False, "problems": ["not started"]}
-        self.workflow: dict[str, Any] = {"cycle": 0, "stage": "idle", "stages": {},
+        self.workflow: dict[str, Any] = {"cycle": 0, "stage": "idle",
+                                         "stages": {k: {"status": "idle", "detail": "",
+                                                        "at": 0}
+                                                    for k in WORKFLOW_STAGES},
                                          "active_links": [], "updated_at": now_ms()}
         self.paused = False
         self.emergency_stop = False

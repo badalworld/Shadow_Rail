@@ -335,7 +335,7 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
         <Panel title="Workflow log" right={<Chip color="var(--color-cyan)">{logs.length} lines</Chip>}>
           <div className="scroll-thin flex max-h-[16rem] flex-col gap-1 overflow-y-auto pr-1">
             {logs.length === 0 && <p className="text-[0.72rem] dim">no log lines yet</p>}
-            {[...logs].slice(-30).reverse().map((l, i) => (
+            {logs.slice(0, 30).map((l, i) => (
               <div key={`${l.ts}-${i}`} className="flex items-start gap-2 text-[0.68rem]">
                 <span className="mono shrink-0 dim">{clock(l.ts)}</span>
                 <span className="chip shrink-0"
@@ -397,7 +397,8 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
       {/* ── celebration tape ─────────────────────────────────────── */}
       <Panel title="Latest closes" right={<Zap size={13} />}>
         {(() => {
-          const closes = (logs || []).filter((l) => /closed \(|reconciled/i.test(l.message)).slice(-6).reverse()
+          // logs are newest-first: take the most recent closes, not the oldest
+          const closes = (logs || []).filter((l) => /closed \(|reconciled/i.test(l.message)).slice(0, 6)
           if (!closes.length) {
             return <p className="text-[0.72rem] dim">no closed trades yet — the first win is celebrated here 🎉</p>
           }

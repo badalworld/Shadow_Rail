@@ -123,6 +123,7 @@ async def get_config() -> dict:
 async def put_config(patch: dict = Body(...)) -> dict:
     cfg = STORE.update(patch)
     e = eng()
+    unknown = STORE.unknown_keys(patch)
     # hot-apply the pieces that can change at runtime
     e.risk = type(e.risk)(cfg.risk)
     e.registry = build_registry(cfg)
@@ -132,8 +133,12 @@ async def put_config(patch: dict = Body(...)) -> dict:
     GOVERNOR.allow_critical_above_cap = cfg.engine.allow_critical_above_cap
     e.log("info", "ceo-bot", "Settings updated from the dashboard",
           {"sections": list(patch.keys())})
-    BUS.publish("config.updated", {"sections": list(patch.keys())})
-    return {"config": STORE.public_view(), "applied": True}
+    BUS.publish("config.updated", {"sections": list(patch.keys()),
+                                   "unknown": unknown})
+    if unknown:
+        e.log("warn", "ceo-bot",
+              f"Settings payload contained unknown keys (ignored): {unknown}")
+    return {"config": STORE.public_view(), "applied": True, "unknown": unknown}
 
 
 @app.post("/api/config/test-connection")
@@ -198,6 +203,9 @@ async def verify_ip(payload: dict = Body(default={})) -> dict:
     Verifies the account is reachable *with* the whitelist in place.
     """
     out = {"ip": await public_ip(), "whitelisted_ok": False}
+    # remember whatever IP string the operator says they whitelisted
+    if str(payload.get("ip_whitelist") or "").strip():
+        STORE.update({"binance": {"ip_whitelist": str(payload["ip_whitelist"]).strip()}})
     key = (payload.get("api_key") or "").strip() or STORE.api_key()
     secret = (payload.get("api_secret") or "").strip() or STORE.api_secret()
     if key and secret:
@@ -207,7 +215,8 @@ async def verify_ip(payload: dict = Body(default={})) -> dict:
             await client.start()
             await client.account()
             out["whitelisted_ok"] = True
-            STORE.update({"binance": {"ip_whitelist_confirmed": True}})
+            STORE.update({"binance": {"ip_whitelist_confirmed": True,
+                                      "ip_whitelist": out["ip"]}})
             out["message"] = "This IP is accepted by Binance — whitelist confirmed"
         except ExchangeError as exc:
             out["message"] = str(exc)
@@ -229,6 +238,7 @@ async def ip_info() -> dict:
         "public_ip": ip,
         "hostname": host,
         "whitelist_confirmed": STORE.cfg.binance.ip_whitelist_confirmed,
+        "whitelist_entry": STORE.cfg.binance.ip_whitelist,
         "instructions": [
             "Binance → API Management → your key → Edit restrictions",
             "Tick 'Restrict access to trusted IPs only' and paste the IP above",
@@ -286,9 +296,8 @@ async def stats() -> dict:
 
 
 # ════════════════════════════════════════════════════════════════ trades
-@app.get("/api/trades/open")
-async def open_trades() -> dict:
-    e = eng()
+async def open_trades_payload(e: TradingEngine) -> dict:
+    """Live open positions (shared by GET /api/trades/open and the boot frame)."""
     out = []
     positions = {}
     with contextlib.suppress(Exception):
@@ -306,6 +315,11 @@ async def open_trades() -> dict:
                     "monitor_id": t.get("monitor_bot_id")})
     return {"trades": out, "count": len(out),
             "max": STORE.cfg.risk.max_concurrent_trades}
+
+
+@app.get("/api/trades/open")
+async def open_trades() -> dict:
+    return await open_trades_payload(eng())
 
 
 @app.get("/api/trades/closed")
@@ -328,9 +342,8 @@ async def trade_detail(trade_id: int) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════ scan
-@app.get("/api/scan")
-async def scan() -> dict:
-    e = eng()
+async def scan_payload(e: TradingEngine) -> dict:
+    """The scanner view (shared by GET /api/scan and the boot frame)."""
     snap = e.scan_snapshot
     return {
         "cycle": snap.get("cycle", 0),
@@ -341,6 +354,11 @@ async def scan() -> dict:
         "seconds_to_close": round(e.hub.seconds_to_close(), 1),
         "timeframe": STORE.cfg.engine.monitored_timeframe,
     }
+
+
+@app.get("/api/scan")
+async def scan() -> dict:
+    return await scan_payload(eng())
 
 
 @app.post("/api/scan/run")
@@ -527,18 +545,15 @@ if WEB_DIR.exists():
 async def boot_payload() -> dict[str, Any]:
     """The same frame the websocket hello sends — shared by `/` and `/ws`."""
     e = eng()
-    snap = dict(e.scan_snapshot or {})
-    rows = [dict(t) for t in e.open_trades.values()]
+    scan = await scan_payload(e)
+    open_trades = await open_trades_payload(e)
     return {"bots": e.registry.snapshot(GOVERNOR.snapshot()),
             "status": e.status(),
             "equity": e.last_equity or JOURNAL.state.as_dict(),
             "stats": await JOURNAL.refresh_stats(),
-            "scan": {"by_bot": snap.get("by_bot", {}),
-                     "opportunities": snap.get("opportunities", []),
-                     "cycle": snap.get("cycle", 0),
-                     "updated_at": snap.get("updated_at", 0),
-                     "seconds_to_close": snap.get("seconds_to_close", 0)},
-            "open_trades": rows,
+            "scan": scan,
+            "open_trades": open_trades["trades"],
+            "open_trades_meta": {"count": open_trades["count"], "max": open_trades["max"]},
             "closed_trades": {"trades": await DB.closed_trades(limit=100),
                               "total": await DB.count_closed()},
             "config": STORE.public_view(),

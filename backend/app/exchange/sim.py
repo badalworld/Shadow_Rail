@@ -64,8 +64,6 @@ class SimOrder:
     status: str = "NEW"
     reduce_only: bool = False
 
-    nk: list[str] = field(default_factory=list)
-
 
 DEFAULT_UNIVERSE: list[tuple[str, float, float]] = [
     # (symbol, start price, per-5m sigma)
@@ -144,7 +142,7 @@ class SimExchange:
     def __init__(self, balance: float = 10_000.0, universe: int = 150,
                  time_accel: float = 30.0, interval: str = "5m",
                  history_bars: int = 1200, warm_candles: int = 240,
-                 seed: int = 20261003):
+                 seed: int = 20261003, restore: dict | None = None):
         self.rng = random.Random(seed)
         self.balance = balance
         self.start_balance = balance
@@ -172,7 +170,7 @@ class SimExchange:
         self._virtual_now = (now_ms() // self.bar_ms) * self.bar_ms
         self._last_funding_ms = self._virtual_now
         # continuity across restarts (see export_state/import_state)
-        self._restore: dict | None = None
+        self._restore: dict | None = restore
         self.filters: dict[str, SymbolFilter] = {}
         self._on_candle: Callable | None = None
         self._on_close: Callable | None = None
@@ -181,6 +179,8 @@ class SimExchange:
         self.running = False
         self._build_filters()
         self._seed_history()
+        if restore:
+            self.import_state(restore)
 
     # ------------------------------------------------------------- universe
     def _build_filters(self) -> None:
@@ -234,10 +234,7 @@ class SimExchange:
                 price = candle.c
             anchor = (self._restore or {}).get("end_prices", {}).get(sym)
             if anchor and price > 0:
-                # keep the price series continuous with the previous run
-                k = float(anchor) / price
-                candles = [Candle(c.t, c.o * k, c.h * k, c.l * k, c.c * k, c.v) for c in candles]
-                price = float(anchor)
+                candles, price = self._anchor(candles, float(anchor))
             s.price = price
             self.candles[sym] = candles
             self.tickers[sym] = Ticker(
@@ -247,6 +244,11 @@ class SimExchange:
                 mark=price, funding_rate=0.0001, updated_at=now_ms())
 
     # ------------------------------------------------------- state continuity
+    @staticmethod
+    def _pick(obj: Any, *names: str) -> dict:
+        """Copy only the attributes the dataclass actually has."""
+        return {n: getattr(obj, n) for n in names if hasattr(obj, n)}
+
     def export_state(self) -> dict:
         """Snapshot the paper account so a restart does not wipe the demo."""
         return {
@@ -265,17 +267,36 @@ class SimExchange:
             ],
             "orders": [
                 {"order_id": o.order_id, "symbol": o.symbol, "type": o.type,
-                 "side": o.side, "qty": o.qty, "price": o.price,
-                 "stop_price": o.stop_price, "reduce_only": o.reduce_only,
-                 "status": o.status, "created": o.created}
+                 "side": o.side, "qty": o.qty, "stop_price": o.stop_price,
+                 "close_position": o.close_position,
+                 "reduce_only": o.reduce_only, "status": o.status}
                 for o in self.orders.values() if o.status == "NEW"
             ],
         }
 
+    @staticmethod
+    def _anchor(candles: list[Candle], anchor: float) -> tuple[list[Candle], float]:
+        """Rescale a candle series so its last close equals `anchor`."""
+        last = candles[-1].c if candles else 0.0
+        if not candles or last <= 0 or anchor <= 0:
+            return candles, anchor or last
+        k = anchor / last
+        return ([Candle(c.t, c.o * k, c.h * k, c.l * k, c.c * k, c.v) for c in candles],
+                anchor)
+
     def import_state(self, state: dict) -> None:
-        """Restore a previous snapshot (call right after construction)."""
+        """Restore a previous snapshot (at construction or shortly after)."""
         if not state:
             return
+        # keep the chart continuous: the last seeded candle must close at the
+        # price the previous run stopped on
+        for sym, price in (state.get("end_prices") or {}).items():
+            if sym in self.candles and price:
+                self.candles[sym], self.syms[sym].price = self._anchor(
+                    self.candles[sym], float(price))
+                t = self.tickers.get(sym)
+                if t:
+                    t.last = t.bid = t.ask = t.mark = self.syms[sym].price
         self.balance = float(state.get("balance", self.balance))
         self.start_balance = float(state.get("start_balance", self.start_balance))
         self._order_seq = int(state.get("order_seq", self._order_seq))
@@ -290,10 +311,10 @@ class SimExchange:
         for row in state.get("orders", []):
             self.orders[row["order_id"]] = SimOrder(
                 order_id=row["order_id"], symbol=row["symbol"], type=row["type"],
-                side=row["side"], qty=float(row["qty"]), price=float(row.get("price") or 0),
+                side=row["side"], qty=float(row["qty"]),
                 stop_price=float(row.get("stop_price") or 0),
-                reduce_only=bool(row.get("reduce_only")), status=row.get("status", "NEW"),
-                created=int(row.get("created", 0)))
+                close_position=bool(row.get("close_position", True)),
+                reduce_only=bool(row.get("reduce_only")), status=row.get("status", "NEW"))
 
     # ---------------------------------------------------------- market data
     async def symbol_filters(self, symbol: str) -> SymbolFilter:

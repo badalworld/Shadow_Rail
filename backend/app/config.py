@@ -91,6 +91,7 @@ class BinanceSettings(BaseModel):
     mode: Literal["live", "paper", "sim"] = "live"
     # 'auto' picks binance when reachable, otherwise sim (with SOS raised)
     transport: Literal["auto", "binance", "sim"] = "auto"
+    ip_whitelist: str = ""               # the IP the operator whitelisted in Binance
     ip_whitelist_confirmed: bool = False
     recv_window_ms: int = 5000
 
@@ -256,26 +257,58 @@ class ConfigStore:
         return self.cfg
 
     def update(self, patch: dict[str, Any]) -> AppConfig:
-        """Deep-merge a partial patch, encrypting secret fields."""
+        """
+        Deep-merge a partial patch, encrypting the secret fields.
+
+        `api_key` / `api_secret` arrive in plain text but are not model fields —
+        they are mapped onto the encrypted `*_enc` columns.  Only the sections
+        (and keys) the caller actually sent are touched, so a partial patch can
+        never erase the rest of the configuration.
+        """
+        secrets = {"api_key": "api_key_enc", "api_secret": "api_secret_enc"}
+        known = {key: set(self._cfg.model_dump().get(key, {}) or {})
+                 for key in ("binance", "risk", "indicator", "engine", "ui", "developer")}
         with self._lock:
             current = self._cfg.model_dump()
             for section, values in patch.items():
-                if section not in current:
-                    continue
-                if not isinstance(values, dict):
+                if section not in current or not isinstance(values, dict):
                     continue
                 for key, value in values.items():
-                    if key not in current[section]:
-                        continue
-                    if key in ("api_key", "api_secret"):
-                        enc_key = f"{key}_enc"
+                    if key in secrets:
                         # empty string = clear the stored secret
-                        current[section][enc_key] = encrypt(str(value).strip()) if str(value).strip() else ""
+                        enc_key = secrets[key]
+                        current[section][enc_key] = (
+                            encrypt(str(value).strip()) if str(value).strip() else "")
+                        continue
+                    if key not in current[section]:
+                        # tolerate a round-tripped payload: a key we do not model
+                        # is reported rather than swallowed
+                        if key in known.get(section, ()):
+                            current[section][key] = value
                         continue
                     current[section][key] = value
             self._cfg = AppConfig.model_validate(current)
             self.save()
             return self._cfg
+
+    def unknown_keys(self, patch: dict[str, Any]) -> list[str]:
+        """Keys a client sent that this config does not model (UI drift guard)."""
+        known = {"binance": set(BinanceSettings.model_fields),
+                 "risk": set(RiskSettings.model_fields),
+                 "indicator": set(IndicatorSettings.model_fields),
+                 "engine": set(EngineSettings.model_fields),
+                 "ui": set(UIConfig.model_fields),
+                 "developer": set(DeveloperInfo.model_fields)}
+        known["binance"] |= {"api_key", "api_secret"}
+        out: list[str] = []
+        for section, values in (patch or {}).items():
+            if not isinstance(values, dict):
+                continue
+            if section not in known:
+                out.append(section)
+                continue
+            out.extend(f"{section}.{k}" for k in values if k not in known[section])
+        return out
 
     # ---- secrets ----------------------------------------------------------
     def api_key(self) -> str:

@@ -56,13 +56,26 @@ class MarketHub:
             return await DB.kv_get(self.SIM_STATE_KEY)
         return None
 
-    async def persist_sim_state(self) -> None:
-        """Keep the paper account across restarts so the journal never lies."""
+    async def persist_sim_state(self) -> bool:
+        """
+        Keep the paper account across restarts so the journal never lies.
+
+        Returns True when the snapshot was written.  Failures are reported on
+        the bus rather than swallowed — a silently frozen snapshot is worse
+        than no snapshot, because the journal then looks authoritative.
+        """
         if self.transport != "sim" or not isinstance(self.exchange, SimExchange):
-            return
-        with contextlib.suppress(Exception):
+            return False
+        try:
             from ..db import DB
             await DB.kv_set(self.SIM_STATE_KEY, self.exchange.export_state())
+            self.sim_persist_failures = 0
+            return True
+        except Exception as exc:
+            self.sim_persist_failures = getattr(self, "sim_persist_failures", 0) + 1
+            BUS.publish("sim.persist_failed", {"error": str(exc)[:200],
+                                               "failures": self.sim_persist_failures})
+            return False
 
     async def reset_sim_state(self) -> None:
         with contextlib.suppress(Exception):
@@ -126,21 +139,21 @@ class MarketHub:
                 BUS.publish("transport.failed", {"error": self.last_error})
 
         if self.exchange is None:
-            # simulation fallback (offline demo / rehearsal)
+            # simulation fallback (offline demo / rehearsal) — resume the paper
+            # account from the last snapshot so a restart continues the run
+            restored = await self._load_sim_state()
             sim = SimExchange(balance=10_000.0,
                               universe=self.store.cfg.engine.universe_size,
                               time_accel=self.store.cfg.engine.sim_time_accel,
-                              interval=self.store.cfg.engine.monitored_timeframe)
-            restored = await self._load_sim_state()
-            if restored:
-                with contextlib.suppress(Exception):
-                    sim.import_state(restored)
-                    BUS.publish("transport.restored", {"positions": len(sim.positions)})
+                              interval=self.store.cfg.engine.monitored_timeframe,
+                              restore=restored)
             self.exchange = sim
             self.transport = "sim"
             if self.mode == "live":
                 self.mode = "sim"       # never pretend to trade live without a feed
-            BUS.publish("transport.ready", {"transport": "sim", "reason": self.last_error})
+            BUS.publish("transport.ready", {"transport": "sim", "reason": self.last_error,
+                                            "resumed": bool(restored),
+                                            "open_positions": len(sim.positions)})
 
         await self.refresh_filters()
         await self.refresh_tickers()

@@ -247,3 +247,72 @@ async def test_equity_bridge_reconciles_with_the_exchange(db, store):
     assert state.as_dict()["fees_paid_total"] == pytest.approx(
         state.fees_paid + state.open_entry_fees, abs=1e-4)   # as_dict rounds to 4dp
     await hub.stop()
+
+
+async def test_sim_state_round_trips_with_protective_orders():
+    """Regression: export_state() referenced SimOrder fields that did not exist,
+    so every persist raised and the snapshot silently froze at boot."""
+    from app.exchange.sim import SimExchange, SimOrder
+
+    sim = SimExchange(universe=6, history_bars=120, warm_candles=40)
+    await sim.market_order("BTCUSDT", "BUY", 0.01)
+    stop = await sim.stop_market("BTCUSDT", "SELL",
+                                 sim.last_price("BTCUSDT") * 0.9, qty=0.01)
+    take = await sim.take_profit_market("BTCUSDT", "SELL",
+                                        sim.last_price("BTCUSDT") * 1.1, qty=0.01)
+    assert stop.status == "NEW" and take.status == "NEW"
+
+    state = sim.export_state()                     # must not raise
+    assert len(state["orders"]) == 2
+
+    reborn = SimExchange(universe=6, history_bars=120, warm_candles=40)
+    reborn.import_state(state)
+    assert set(reborn.orders) == set(sim.orders)
+    for oid, order in sim.orders.items():
+        copy = reborn.orders[oid]
+        for field in ("symbol", "side", "type", "qty", "stop_price", "close_position"):
+            assert getattr(copy, field) == getattr(order, field), field
+    assert reborn.positions["BTCUSDT"].qty == pytest.approx(sim.positions["BTCUSDT"].qty)
+
+
+async def test_hub_persist_reports_failure_instead_of_freezing(db, store, monkeypatch):
+    """A broken snapshot must be visible, not silently ignored."""
+    from app.bus import BUS
+    from app.exchange.hub import MarketHub
+
+    store.cfg.engine.universe_size = 12
+    store.cfg.binance.transport = "sim"
+    store.cfg.engine.sim_time_accel = 3000.0
+    store.save()
+    hub = MarketHub(store=store)
+    await hub.start()
+
+    assert await hub.persist_sim_state() is True
+    seen: list[dict] = []
+    BUS.on("sim.persist_failed", lambda ev: seen.append(ev.data))
+
+    def boom() -> dict:
+        raise RuntimeError("serialisation exploded")
+
+    monkeypatch.setattr(hub.exchange, "export_state", boom)
+    assert await hub.persist_sim_state() is False
+    assert seen and "serialisation exploded" in seen[0]["error"]
+    await hub.stop()
+
+
+async def test_restored_prices_are_continuous_with_the_seeded_history():
+    """The chart (and therefore the indicator) must not see a price jump at the
+    seam: the last seeded candle has to close where the previous run stopped."""
+    sim = SimExchange(universe=8, history_bars=200, warm_candles=40)
+    await sim.step_bar()
+    state = sim.export_state()
+
+    mid = SimExchange(universe=8, history_bars=200, warm_candles=40, restore=state)
+    for sym in state["end_prices"]:
+        last_close = mid.candles[sym][-1].c
+        assert last_close == pytest.approx(state["end_prices"][sym], rel=1e-9), sym
+        assert mid.syms[sym].price == pytest.approx(last_close, rel=1e-9), sym
+        assert mid.tickers[sym].last == pytest.approx(last_close, rel=1e-9), sym
+    # and the restored series still behaves (indicator inputs stay sane)
+    ratios = [c.c / c.o for c in mid.candles["BTCUSDT"][-50:]]
+    assert all(0.5 < r < 2.0 for r in ratios)

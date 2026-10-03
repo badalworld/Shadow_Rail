@@ -130,10 +130,17 @@ export const Layout: React.FC<{
             </div>
           </div>
           <div className="flex items-center justify-between px-1 text-[0.6rem] dim">
-            <span className="flex items-center gap-1">
-              <span className="inline-block h-1.5 w-1.5 rounded-full pulse-dot"
-                style={{ background: connected ? 'var(--color-bull)' : 'var(--color-bear)' }} />
-              {connected ? 'stream live' : 'reconnecting'}
+            <span className="flex items-center gap-1" title={
+              connected
+                ? 'Realtime websocket connected — trades, bots and P&L update instantly'
+                : 'Websocket reconnecting — the REST poll keeps every panel fresh meanwhile'
+            }>
+              <span className={`inline-block h-1.5 w-1.5 rounded-full ${connected ? 'pulse-dot' : ''}`}
+                style={{
+                  background: connected ? 'var(--color-bull)'
+                    : status ? 'var(--color-amber)' : 'var(--sr-dim)',
+                }} />
+              {connected ? 'stream live' : status ? 'polling' : 'connecting'}
             </span>
             <span className="mono">cycle #{status?.cycle ?? 0}</span>
           </div>
