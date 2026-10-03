@@ -67,7 +67,7 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
         }
         bodyClass="p-2"
       >
-        <div className="relative h-[calc(100vh-21rem)] min-h-[30rem] w-full overflow-hidden rounded-xl">
+        <div className="relative h-[calc(100vh-17rem)] min-h-[34rem] w-full overflow-hidden rounded-xl">
           <BotMap3D
             bots={bots}
             links={links}

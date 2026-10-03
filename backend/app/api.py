@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 from typing import Any
 
@@ -542,6 +543,18 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 if WEB_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(WEB_DIR / "assets")), name="assets")
 
+    @app.middleware("http")
+    async def _asset_cache_headers(request: Request, call_next):     # noqa: ANN001
+        """Hashed bundles are immutable; the shell itself is never cached."""
+        response = await call_next(request)
+        if request.url.path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+    # every rebuild gets new asset filenames, and we add the build stamp on top
+    # so no browser/proxy cache can ever serve yesterday's dashboard
+    _ASSET_RE = re.compile(r'(/assets/[A-Za-z0-9_.\-]+\.(?:js|css|woff2?|png|jpg|svg))')
+
     async def render_index() -> Any:
         """Serve the SPA shell with a boot snapshot inlined so the first paint
         already shows live numbers (no flash of zeros before the socket opens)."""
@@ -549,8 +562,10 @@ if WEB_DIR.exists():
         if not index.exists():
             raise HTTPException(404, "dashboard bundle not built")
         html = index.read_text(encoding="utf-8")
+        stamp = str(int(index.stat().st_mtime))
+        html = _ASSET_RE.sub(lambda m: f"{m.group(1)}?v={stamp}", html)
         if "__SHADOW_RAIL_BOOT__" in html:
-            return HTMLResponse(html)
+            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
         try:
             boot = await boot_payload()
             payload = json.dumps(boot, default=str).replace("</", "<\\/")

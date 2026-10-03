@@ -96,6 +96,9 @@ cd backend && ../.venv/bin/python -m app.indicators.ghost
 # dev dashboard with hot reload (proxies /api + /ws to :8080)
 cd frontend && npm run dev
 
+# prove the dashboard the server is serving matches the agreed UI
+cd frontend && npm run ui:check
+
 # rebuild the dashboard bundle FastAPI serves
 cd frontend && npm run build
 ```
@@ -191,6 +194,33 @@ persisted, so restarts continue where they left off instead of resetting the dem
    restores the previous stop, and if that fails too it flattens the position rather than leave it naked.
 7. Emergency **FLATTEN ALL** button in the sidebar; `pause` stops new entries without disturbing
    the monitors.
+
+## The Command Deck
+
+The main page is deliberately one thing: the **3D bot work zone** (the whole swarm working on a
+lit deck — bodies, visors, contact shadows, pulses travelling the rails) and, underneath it, the six
+numbers that matter: **starting balance · current equity · opened positions · realised P&L ·
+fees paid · win rate**.  Everything else lives in the menu:
+
+| Page | What is there |
+|---|---|
+| Open Positions | live trades, per-position ROI / peak ROI, the ROI trail lock, ledger check |
+| Market Scan | scanner bots × assets |
+| Closed Trades | history, P&L charts, the celebration tape of the newest closes |
+| Bot Roster | every agent + the pipeline-stage rail |
+| Workflow Log | the full audit trail |
+| Settings | keys + IP, risk/TP-SL (incl. the ROI trail), indicator, engine, advanced |
+| About | developer + build info |
+
+The sidebar starts **collapsed** — logo plus short labels — and the **⋯ button at the top** expands
+the full menu with the engine controls.
+
+### Never see a stale dashboard again
+
+The shell is served `Cache-Control: no-store` and every asset URL is stamped with the build time, so
+a browser or proxy cannot hand you yesterday's bundle.  `npm run ui:check` follows the exact URL a
+browser would load and asserts all of the above against the **rendered** Command Deck — run it after
+any rebuild.
 
 ## Credits
 

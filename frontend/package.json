@@ -3,11 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Shadow Rail — Automatic Trading Engine dashboard (liquid glass / hacker)",
+  "description": "Shadow Rail \u2014 Automatic Trading Engine dashboard (liquid glass / hacker)",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b --noCheck && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "ui:check": "node scripts/ui-spec-check.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^9.114.3",

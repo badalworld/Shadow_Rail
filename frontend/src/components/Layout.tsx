@@ -68,12 +68,12 @@ export const Layout: React.FC<{
       {/* ───────────────────────── sidebar ───────────────────────── */}
       <aside
         className="glass m-3 mr-0 flex shrink-0 flex-col overflow-hidden p-2.5 transition-[width] duration-300"
-        style={{ width: menuOpen ? '15.5rem' : '4.25rem' }}>
+        style={{ width: menuOpen ? '15.5rem' : '6.1rem' }}>
 
         {/* header: logo (always) + ⋯ to expand the full menu */}
         <div className="flex items-center gap-2">
-          <img src="/logo.svg" alt="Shadow Rail" width={38} height={38}
-            className="shrink-0 rounded-xl" />
+          <img src="/logo.svg" alt="Shadow Rail" width={menuOpen ? 38 : 32}
+            height={menuOpen ? 38 : 32} className="shrink-0 rounded-xl" />
           {menuOpen && (
             <div className="min-w-0 flex-1">
               <div className="truncate text-[0.9rem] font-bold tracking-[0.14em] accent-text glow-text">
@@ -86,13 +86,13 @@ export const Layout: React.FC<{
             onClick={() => setMenuOpen((v) => !v)}
             title={menuOpen ? 'Collapse menu' : 'Open menu'}
             aria-label={menuOpen ? 'Collapse menu' : 'Open menu'}
-            className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition-colors hover:opacity-80"
+            className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-colors hover:opacity-80"
             style={{
               border: '1px solid var(--sr-border)',
               background: menuOpen ? 'color-mix(in oklab, var(--sr-accent) 16%, transparent)' : 'transparent',
               cursor: 'pointer',
             }}>
-            <MoreHorizontal size={16} style={{ color: menuOpen ? 'var(--sr-accent)' : 'var(--sr-dim)' }} />
+            <MoreHorizontal size={15} style={{ color: menuOpen ? 'var(--sr-accent)' : 'var(--sr-dim)' }} />
           </button>
         </div>
 
@@ -116,7 +116,7 @@ export const Layout: React.FC<{
                     <span className="block truncate text-[0.6rem] dim">{n.hint}</span>
                   </span>
                 ) : (
-                  <span className="truncate text-[0.66rem] uppercase tracking-wider"
+                  <span className="truncate text-[0.62rem] uppercase tracking-wide"
                     style={{ color: active ? 'var(--sr-text)' : 'var(--sr-dim)' }}>
                     {shortLabel(n.label)}
                   </span>
