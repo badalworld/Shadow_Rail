@@ -169,8 +169,18 @@ class TradingEngine:
         self.started_at = now_ms()
         self._log_task = asyncio.create_task(self._log_writer())
         await self.hub.start()
-        self.scanner_buckets = self.hub.scanner_allocation(
-            self.store.cfg.engine.scanner_bots, self.store.cfg.engine.assets_per_bot)
+        # the office record (ranks, hires, firings) survives a restart
+        with contextlib.suppress(Exception):
+            saved = await DB.kv_get("office.roster")
+            if saved:
+                n = self.registry.restore(saved)
+                if n:
+                    self.log("info", "ceo-bot",
+                             f"office restored — {n} seats, "
+                             f"{len(self.registry.retired)} agents on the retired list")
+        self.scanner_buckets = self._split_universe_by_rank() or \
+            self.hub.scanner_allocation(self.store.cfg.engine.scanner_bots,
+                                        self.store.cfg.engine.assets_per_bot)
         self._assign_scanner_symbols()
         await self._load_open_trades()
         # show the locked starting balance straight away
@@ -198,6 +208,7 @@ class TradingEngine:
         # flush the paper account so nothing is lost between the last tick and now
         with contextlib.suppress(Exception):
             await self.hub.persist_sim_state()
+        await self.persist_office()
         self.running = False
         for t in self.tasks:
             t.cancel()
@@ -214,6 +225,11 @@ class TradingEngine:
         self.log("warn", "ceo-bot", "Engine stopped")
 
     # ================================================================== log
+    async def persist_office(self) -> None:
+        """Write the office record (ranks, hires, firings) so a restart keeps it."""
+        with contextlib.suppress(Exception):
+            await DB.kv_set("office.roster", self.registry.state())
+
     def log(self, level: str, bot_id: str, message: str, payload: dict | None = None,
             topic: str | None = None) -> None:
         rec = {"ts": now_ms(), "level": level, "bot_id": bot_id, "message": message,
@@ -276,10 +292,85 @@ class TradingEngine:
             bot = self.registry.get(f"scanner-{i+1}")
             if bot:
                 bot.assigned = list(bucket)
+        sizes = [len(b) for b in self.scanner_buckets]
+        spread = f"{sizes[0]} assets" if len(set(sizes)) <= 1 else \
+            f"{min(sizes)}–{max(sizes)} assets by level"
         self.log("info", "ceo-bot",
                  f"Scanner allocation ready — {len(self.scanner_buckets)} bots × "
-                 f"{len(self.scanner_buckets[0]) if self.scanner_buckets else 0} assets "
-                 f"(ranked by volatility)")
+                 f"{spread} (ranked by volatility, weighted by field rank)")
+
+    def _split_universe_by_rank(self) -> list[list[str]]:
+        """Deal the volatility-ranked universe across the scanner desks in
+        proportion to each agent's level: a promoted scanner sweeps more of the
+        market, a fresh hire sweeps less.  With an all-Recruit floor this is
+        exactly the configured `assets_per_bot` split."""
+        scanners = [b for b in self.registry.by_group("scanner")
+                    if b.status != "fired"]
+        universe = list(self.hub.universe)
+        if not scanners or not universe:
+            return []
+        cfg = self.store.cfg.engine
+        total = min(len(universe), int(cfg.assets_per_bot) * len(scanners))
+        weights = [b.workload_weight for b in scanners]
+        shares = [total * w / sum(weights) for w in weights]
+        counts = [max(1, int(v)) for v in shares]
+        while sum(counts) > total:                    # never over-allocate
+            i = max(range(len(counts)), key=lambda j: (counts[j], -weights[j]))
+            counts[i] -= 1
+        rest = total - sum(counts)
+        order = sorted(range(len(scanners)),
+                       key=lambda i: (-scanners[i].rank_index, scanners[i].slot))
+        for k in range(max(0, rest)):
+            counts[order[k % len(order)]] += 1
+        # deal round-robin by volatility so every desk keeps a fair mix
+        buckets: list[list[str]] = [[] for _ in scanners]
+        rank = 0
+        for sym in universe:
+            if all(len(b) >= c for b, c in zip(buckets, counts)):
+                break
+            for offset in range(len(buckets)):
+                j = (rank + offset) % len(buckets)
+                if len(buckets[j]) < counts[j]:
+                    buckets[j].append(sym)
+                    break
+            rank += 1
+        return buckets
+
+    def _rebalance_workload(self) -> None:
+        """Hand the floor to the ranks: scanners get a level-weighted slice of
+        the universe, monitor desks get positions in proportion to capacity."""
+        buckets = self._split_universe_by_rank()
+        if buckets:
+            self.scanner_buckets = buckets
+            self._assign_scanner_symbols()
+        for symbol in list(self.symbol_monitor.keys()):
+            self.symbol_monitor.pop(symbol, None)
+        for symbol in self.symbol_to_trade:
+            self._assign_monitor_for(symbol)
+
+    def _office_pass(self, trigger: str = "") -> dict:
+        """Run the office: promotions every 20 units, replacements for failures."""
+        res = self.registry.office_pass()
+        if not (res["promoted"] or res["fired"]):
+            return res
+        for rec in res["promoted"]:
+            self.log("success", rec["bot_id"],
+                     f"promoted {rec['from']} → {rec['to']} "
+                     f"({rec['completed_units']} completed {rec['unit']}s) — "
+                     f"workload now {rec['capacity']} items/cycle",
+                     {"office": rec}, topic="office")
+        for rec in res["fired"]:
+            self.log("warn", rec["bot_id"],
+                     f"{rec['name']} relieved of duty ({rec['reason']}) — "
+                     f"{rec['tasks_failed']} failed of {rec['tasks_done'] + rec['tasks_failed']} tasks",
+                     {"office": rec}, topic="office")
+        for rec in res["hired"]:
+            self.log("info", rec["bot_id"],
+                     f"hired {rec['name']} into the seat ({trigger or 'office'})",
+                     {"office": rec}, topic="office")
+        self._rebalance_workload()
+        self.registry.publish_all(GOVERNOR.snapshot())
+        return res
 
     # ============================================================== loops
     async def _connector_loop(self) -> None:
@@ -530,6 +621,10 @@ class TradingEngine:
         self.registry.set_status("ceo-bot", "success", f"cycle #{self.cycle}",
                                  message=f"{len(opened)} opened / {len(approved)} approved / "
                                          f"{len(opportunities)} scanned")
+        for bot in self.registry.by_group("core") + self.registry.by_group("verify") \
+                + self.registry.by_group("finance"):
+            if bot.status not in ("fired", "offline"):
+                self.registry.note_unit(bot.bot_id, "cycle")
         self.log("info", "ceo-bot",
                  f"Cycle #{self.cycle} complete in {time.time() - t0:.2f}s — "
                  f"{len(opportunities)} opportunities, {len(approved)} approved, "
@@ -1089,11 +1184,19 @@ class TradingEngine:
 
     # ========================================================== stage 5: monitor
     def _assign_monitor_for(self, symbol: str) -> str:
-        monitors = self.registry.by_group("monitor")
+        """Seat the position with the least-loaded desk for its level, so a
+        promoted monitor carries more of the book and a rookie carries less."""
+        monitors = [b for b in self.registry.by_group("monitor")
+                    if b.status != "fired"]
         if not monitors:
             return ""
-        idx = len(self.symbol_monitor) % len(monitors)
-        bot = monitors[idx]
+        load = {b.bot_id: sum(1 for v in self.symbol_monitor.values()
+                              if v == b.bot_id) for b in monitors}
+        # weighted fair share: seat the symbol where the *next* position costs
+        # the least fraction of that desk's capacity, so the Legend carries the
+        # most and a fresh Recruit carries the least
+        bot = min(monitors, key=lambda b: ((load[b.bot_id] + 1) / max(1, b.capacity),
+                                           load[b.bot_id], b.slot))
         self.symbol_monitor[symbol] = bot.bot_id
         trade_id = self.symbol_to_trade.get(symbol)
         if trade_id and trade_id in self.open_trades:
@@ -1531,14 +1634,20 @@ class TradingEngine:
         # ── bot reactions: celebrate on a win, sad on a loss ───────────────
         for bot in self.registry.all():
             self.registry.set_mood(bot.bot_id, "happy" if win else "sad", 30)
+        carriers = [bid for bid in (trade.get("scanner_id"), trade.get("analyst_id"),
+                                    trade.get("exec_bot_id"), trade.get("monitor_bot_id"))
+                    if bid]
         for bot in self.registry.all():
-            if bot.bot_id in (trade.get("scanner_id"), trade.get("analyst_id"),
-                              trade.get("exec_bot_id"), trade.get("monitor_bot_id")):
+            if bot.bot_id in carriers:
                 if win:
                     bot.metrics.wins += 1
                 else:
                     bot.metrics.losses += 1
-        self.registry.evaluate_promotions()
+        # ── the office: a closed trade is a completed unit for every seat that
+        #    carried it; every 20 units is a field promotion
+        for bid in carriers:
+            self.registry.note_unit(bid, "trade")
+        self._office_pass(f"trade {symbol} closed")
         BUS.publish("celebration", {
             "win": win, "symbol": symbol, "net": round(net, 2),
             "reason": reason, "r_multiple": round(r_multiple, 2),
@@ -1623,10 +1732,16 @@ class TradingEngine:
                 if self.cycle % 6 == 0:
                     await self.hub.refresh_tickers()
                     await self.hub.build_universe()
-                    self.scanner_buckets = self.hub.scanner_allocation(
-                        self.store.cfg.engine.scanner_bots,
-                        self.store.cfg.engine.assets_per_bot)
+                    self.scanner_buckets = self._split_universe_by_rank() or \
+                        self.hub.scanner_allocation(
+                            self.store.cfg.engine.scanner_bots,
+                            self.store.cfg.engine.assets_per_bot)
                     self._assign_scanner_symbols()
+                # office round: promotions, replacements, roster persistence
+                with contextlib.suppress(Exception):
+                    self._office_pass("maintenance round")
+                with contextlib.suppress(Exception):
+                    await DB.kv_set("office.roster", self.registry.state())
                 self.registry.set_status("maintenance-bot", "idle", "data normal",
                                          publish=False)
                 # model refresh from our own journal
@@ -1786,6 +1901,7 @@ class TradingEngine:
             "risk": self.risk.effective_exits(),
             "scanner_buckets": [len(b) for b in self.scanner_buckets],
             "links": workflow_links(),
+            "office": self.registry.office_summary(),
         }
 
 

@@ -52,6 +52,7 @@ export const endpoints = {
   scan: () => api.get('/api/scan'),
   runCycle: () => api.post('/api/scan/run'),
   bots: () => api.get('/api/bots'),
+  office: () => api.get('/api/office'),
   bot: (id: string) => api.get(`/api/bots/${id}`),
   promote: (id: string) => api.post(`/api/bots/${id}/promote`),
   logs: (q: Record<string, string | number> = {}) => {

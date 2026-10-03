@@ -6,7 +6,7 @@ import {
 import * as THREE from 'three'
 import type { Bot } from '../../lib/types'
 import {
-  SCAN_SLOT, STATIONS, STATION_BY_GROUP, buildLook, seatsFor, stationOf,
+  SCAN_SLOT, STATIONS, STATION_BY_GROUP, buildLook, headsFor, seatsFor, stationOf,
 } from './layout'
 import type { Detail, StationKey } from './layout'
 import { Human } from './Human'
@@ -372,6 +372,9 @@ const Scene: React.FC<HQProps & {
     return m
   }, [bots])
 
+  /* only the head of each department wears a name badge on the floor */
+  const heads = useMemo(() => headsFor(bots), [bots])
+
   /* station centres = mean seat position (the patroller does not count) */
   const centres = useMemo(() => {
     const acc: Record<string, { x: number; z: number; n: number }> = {}
@@ -416,49 +419,40 @@ const Scene: React.FC<HQProps & {
     const s = snapshot || {}
     const money = (v?: number) => (v === undefined ? '—' : v.toLocaleString(undefined, { maximumFractionDigits: 2 }))
     const groups = (s.groups || []).map((g) => [`${g.label}`, `${g.working}/${g.total}`] as [string, string])
+    // the wall boards state a headline: three rows, one per idea.  The detail
+    // lives on the dashboard pages — the 3D floor must not become a spreadsheet
     return [
       {
         key: 'overview',
-        title: `shadow rail · cycle ${s.cycle ?? 0}`,
+        title: `cycle ${s.cycle ?? 0}`,
         rows: [
           ['stage', (activeStage || 'idle').toUpperCase()],
-          ['agents working', `${s.working ?? 0} / ${bots.length}`],
-          ['open positions', `${s.open ?? 0} / ${s.max ?? 10}`],
-          ['equity', `$${money(s.equity)}`],
-          ['realised p&l', `$${money(s.released)}`],
-          ['fees paid', `$${money(s.fees)}`],
-          ['bar closes in', `${Math.max(0, Math.round(s.scanSeconds || 0))}s`],
+          ['agents', `${s.working ?? 0} working`],
+          ['positions', `${s.open ?? 0} / ${s.max ?? 10}`],
         ] as [string, string][],
       },
       {
         key: 'pipeline',
-        title: 'workflow rail',
-        rows: groups.length ? groups : STATIONS.map((st) => [st.label, '—'] as [string, string]),
+        title: 'departments',
+        rows: (groups.length ? groups : STATIONS.map((st) => [st.short, '—'] as [string, string]))
+          .slice(0, 3),
       },
       {
         key: 'risk',
         title: 'risk governor',
         rows: [
           ['mode', (s.riskLabel || 'indicator default').toUpperCase()],
-          ['margin used', `$${money(s.marginUsed)}`],
-          ['budget / trade', `$${money(s.marginBudget)}`],
-          ['free to deploy', `${s.open !== undefined && s.max !== undefined ? Math.max(0, s.max - s.open) : '—'} slots`],
-          ['roi trail armed', `${s.trailArmed ?? 0}`],
-          ['drawdown', `${(s.drawdown ?? 0).toFixed(2)}%`],
-          ['peak equity', `$${money(s.peak)}`],
+          ['margin / trade', `$${money(s.marginBudget)}`],
+          ['roi trail', `${s.trailArmed ?? 0} armed`],
         ] as [string, string][],
       },
       {
         key: 'equity',
         title: 'equity manager',
         rows: [
-          ['starting balance', `$${money(s.starting)}`],
-          ['equity now', `$${money(s.equity)}`],
-          ['unrealised', `$${money(s.unrealized)}`],
+          ['equity', `$${money(s.equity)}`],
           ['realised p&l', `$${money(s.released)}`],
-          ['fees paid', `$${money(s.fees)}`],
           ['win rate', `${(s.winRate ?? 0).toFixed(1)}%`],
-          ['closed trades', `${s.trades ?? 0}`],
         ] as [string, string][],
       },
     ]
@@ -604,21 +598,16 @@ const Scene: React.FC<HQProps & {
         accents={[accentOf('#f472b6'), accentOf('#38bdf8'), accentOf('#fbbf24'), accentOf('#34d399')]} />
 
       {/* small board over the scanner bay + at the execution pods */}
+      {/* the bay boards carry a headline, not a data dump — the numbers live on
+          the dashboard pages, the floor stays a floor */}
       <group position={[-22.6, 4.4, -2]} rotation={[0, Math.PI / 2, 0]}>
-        <Board w={7.2} h={2.2} px={640} accent={accentOf('#00e5a8')} title="scanner bay"
-          rows={[
-            ['assets', `${(snapshot?.groups?.find((g) => g.key === 'scanner')?.total ?? 5) * 30}`],
-            ['synced', `${snapshot?.scanSeconds !== undefined ? '1m live' : '—'}`],
-            ['bar closes', `${Math.max(0, Math.round(snapshot?.scanSeconds || 0))}s`],
-          ]} bars={curvePoints} />
+        <Board w={7.2} h={2.2} px={640} accent={accentOf('#00e5a8')} title="scan"
+          rows={[['assets', `${(snapshot?.groups?.find((g) => g.key === 'scanner')?.total ?? 5) * 30}`]]}
+          bars={curvePoints} />
       </group>
       <group position={[-4.7, 3.5, 3.6]} rotation={[0, -Math.PI / 2, 0]}>
-        <Board w={5.4} h={1.8} px={512} accent={accentOf('#fbbf24')} title="execution pods"
-          rows={[
-            ['open', `${snapshot?.open ?? 0}/${snapshot?.max ?? 10}`],
-            ['trail armed', `${snapshot?.trailArmed ?? 0}`],
-            ['margin used', `$${(snapshot?.marginUsed ?? 0).toFixed(0)}`],
-          ]} />
+        <Board w={5.4} h={1.8} px={512} accent={accentOf('#fbbf24')} title="execute"
+          rows={[['open', `${snapshot?.open ?? 0}/${snapshot?.max ?? 10}`]]} />
       </group>
 
       {/* ── floor zones: click to fly to a station ────────────────── */}
@@ -630,7 +619,7 @@ const Scene: React.FC<HQProps & {
             : st.key === 'finance' ? 3.6 : 2.8
         return (
           <ZoneMark key={st.key} position={[c.x, 0, c.z]} radius={radius}
-            accent={accentOf(st.accent)} label={st.label}
+            accent={accentOf(st.accent)} label={st.short}
             active={activeStation === st.key || focus === st.key}
             onClick={() => onFocus?.(focus === st.key ? null : st.key)} />
         )
@@ -657,8 +646,10 @@ const Scene: React.FC<HQProps & {
         const station = s.station || 'command'
         const working = status === 'working' || status === 'success'
           || (!!activeStation && activeStation === station)
-        const label = rich || selected === bot.bot_id || hover === bot.bot_id
-          || status === 'celebrating' || status === 'sad' || working
+        // the floor stays legible: a name badge only for the department head
+        // (and for the agent the operator is inspecting)
+        const isHead = heads[station] === bot.bot_id
+        const label = isHead || selected === bot.bot_id || hover === bot.bot_id
         const body = (
           <Human
             bot={bot} look={looks[bot.bot_id]} position={[0, 0, 0]} yaw={0} mode={mode}
@@ -862,17 +853,12 @@ export const HQ: React.FC<HQProps> = (props) => {
             onClick={() => onFocus?.(focus === st.key ? null : st.key)}
             title={`${st.label} · ${st.group}`}
           >
-            {st.label}
+            {st.short}
           </button>
         ))}
       </div>
 
-      {/* ── legend (bottom-right) ──────────────────────────────────── */}
-      {!selected && (
-        <p className="pointer-events-none absolute bottom-4 right-3 mono text-[0.58rem] dim">
-          drag to orbit · scroll to zoom · click an agent for its card
-        </p>
-      )}
+      {/* no instruction text on the floor — clicking an agent says so itself */}
     </div>
   )
 }

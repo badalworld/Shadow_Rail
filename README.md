@@ -214,7 +214,7 @@ banner stays up for as long as the connection is broken.  Everything lives in th
 
 | Page | What is there |
 |---|---|
-| Command Deck | the 3D headquarters only — click agents, fly the floor, nothing else |
+| Command Deck | the 3D headquarters only — short department labels, head-only name badges, click agents, fly the floor |
 | Account | starting balance · current equity · opened positions · realised P&L · fees paid · win rate, the equity sheet, growth, costs and the ledger check |
 | Open Positions | live trades, per-position ROI / peak ROI, the ROI trail lock, ledger check |
 | Market Scan | scanner bots × assets |
@@ -263,10 +263,51 @@ workflow, and the agents in it are the bots that own that stage:
   suits and a `#2d3a4d` floor grid, with a ledge and truss so the room has edges instead of an
   empty sky.  Station cameras were re-aimed to ~20 m so a zone fits the frame whole.  The floor grid
   is architectural only — `ui:check` asserts it is never fed trade or equity data.
-* **Notifications are transient** — the win/loss banner and the toasts live exactly
-  `NOTIFY_MS = 3000` ms (see `frontend/src/state/store.tsx`), so the floor is never covered for
-  long.  `npm run ui:check` asserts that rule against the source, because minification would hide
-  it in the bundle.
+* **Nothing is raised over the floor** — there is no top notification banner.  A win or a loss is
+  stated on the floor itself (the swarm's mood, the sparkles over the winning agent, the board),
+  and the toasts that remain expire in exactly `NOTIFY_MS = 3000` ms (see
+  `frontend/src/state/store.tsx`).  `npm run ui:check` asserts both rules against the source,
+  because minification would hide the timer in the bundle.
+* **The floor names departments, not dossiers** — each of the seven bays carries only its short
+  department label (`COMMAND · SCAN · ANALYST · EXECUTE · VERIFY · MONITOR · FINANCE`, from
+  `STATIONS[].short`) and only the *head* of each department wears a name badge
+  (`headsFor()` in `hq/layout.ts` picks the highest rank, then the best score).  Any other agent
+  still responds to a click and opens its card; the wall boards carry three headline rows each, so
+  the 3D view reads as an office rather than a spreadsheet.
+
+The menu follows the same rule: collapsed, the rail is **symbols only**; the `⋯` button at the top
+expands it into the full labels + hints.  No auto-promotion popup, no banner, no stray text on the
+floor.
+
+### The trading office (promotion, hiring, firing)
+
+The floor is staffed like an office, and the roster is a career, not a label:
+
+* **Promotion every 20 completed units** — Recruit → Operative → Specialist → Elite → Legend.  The
+  unit is a *closed trade the seat carried* (scanner / analyst / execution / monitor) or a *served
+  workflow cycle* (CEO, connector, API guard, verifier, finance).  `PROMOTE_EVERY = 20` lives in
+  `backend/app/bots.py`; the API exposes it on every bot (`unit`, `completed_units`,
+  `next_level_in`, `capacity`).
+* **A level-up changes what the bot is trusted with** — `capacity = base(group) × (1 + 0.20 × level)`.
+  After every promotion the engine reallocates work: `_split_universe_by_rank()` deals the
+  volatility-ranked universe across the scanner desks *in proportion to rank* (a Specialist sweeps
+  ~40 % more than a Recruit, and the total is unchanged), and `_assign_monitor_for()` seats each
+  position with the desk whose capacity is least loaded.
+* **The reliability gate** — a bot whose failure ratio is above 30 % (after 10 tasks) is *held* at
+  its rank until it recovers, however many units it has banked.
+* **Hiring and firing** — an agent with 20+ tasks, 12+ failures and a failure ratio above 55 % is
+  relieved of duty.  The **seat** keeps its id — every link, desk and layout is keyed by it — and
+  the office hires a fresh agent into the same desk at Recruit, with a new call-sign from
+  `CANDIDATES`.  Fired agents stay on the record (`retired`), and the floor is never short-staffed.
+* **Persistence** — the roster (ranks, hires, firings, counters) is written to the `kv` store
+  (`office.roster`) every maintenance round and on shutdown, and restored on boot.
+* **API** — `GET /api/office` returns the ladder, the rules, the retired list and the office log;
+  `GET /api/bots` carries the same summary; the boot frame inlines it so the roster paints at once.
+  `POST /api/bots/{id}/promote` is an operator *merit* rank — a bonus level the 20-unit rule will
+  not undo.
+* **On screen** — *Bot Roster → Trading office* shows the per-department levels, the promotion rule
+  and the office record (promotions, holds, hires, firings); every agent card carries its level,
+  its progress to the next rank and the load it is trusted with.
 
 ### Renderpeople integration
 

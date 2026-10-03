@@ -100,6 +100,10 @@ export const HQPanel: React.FC<{
         {!!closed && <Chip>closed {closed}</Chip>}
         {!!(wins + losses) && <Chip color="var(--color-bull)">win rate {winRate.toFixed(0)}%</Chip>}
         {!!bot.promotions && <Chip color="var(--color-amber)">promotions {bot.promotions}</Chip>}
+        <Chip color="var(--color-cyan)">Lv {bot.rank_index + 1} {bot.rank}</Chip>
+        {typeof bot.next_level_in === 'number' && (
+          <Chip>next rank in {bot.next_level_in} {bot.unit ?? 'trade'}s</Chip>
+        )}
         <Chip>last active {bot.last_active ? timeAgo(bot.last_active) : '—'}</Chip>
       </div>
 

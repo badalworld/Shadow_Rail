@@ -25,6 +25,8 @@ export type StationKey =
 export interface Station {
   key: StationKey
   label: string
+  /** short department name — the only label the 3D floor draws */
+  short: string
   group: string
   /** stage name in the engine workflow that lights this bay up */
   stage: string
@@ -37,41 +39,65 @@ export const ROOM = { halfX: 23, halfZ: 15, height: 10 }
 
 export const STATIONS: Station[] = [
   {
-    key: 'command', label: 'Command Deck', group: 'core', stage: 'connector',
+    key: 'command', label: 'Command Deck', short: 'COMMAND', group: 'core', stage: 'connector',
     accent: '#22d3ee',
     cam: { pos: [0, 8.6, 26.0], target: [0, 2.6, 4.0] },
   },
   {
-    key: 'scan', label: 'Scanner Bay', group: 'scanner', stage: 'scan',
+    key: 'scan', label: 'Scanner Bay', short: 'SCAN', group: 'scanner', stage: 'scan',
     accent: '#00e5a8',
     cam: { pos: [-2.5, 7.6, 8.4], target: [-18, 1.9, -8] },
   },
   {
-    key: 'analyze', label: 'Analyst Wing', group: 'analyst', stage: 'analyze',
+    key: 'analyze', label: 'Analyst Wing', short: 'ANALYST', group: 'analyst', stage: 'analyze',
     accent: '#38bdf8',
     cam: { pos: [-5.5, 8.6, 10.0], target: [9.5, 1.7, -8] },
   },
   {
-    key: 'execute', label: 'Execution Pods', group: 'execution', stage: 'execute',
+    key: 'execute', label: 'Execution Pods', short: 'EXECUTE', group: 'execution', stage: 'execute',
     accent: '#fbbf24',
     cam: { pos: [9.0, 8.0, 12.5], target: [-9.2, 1.6, 3.4] },
   },
   {
-    key: 'verify', label: 'Verification Gate', group: 'verify', stage: 'verify',
+    key: 'verify', label: 'Verification Gate', short: 'VERIFY', group: 'verify', stage: 'verify',
     accent: '#a78bfa',
     cam: { pos: [3.3, 8.4, 15.6], target: [0.4, 2.0, -3.2] },
   },
   {
-    key: 'monitor', label: 'Monitor Wall', group: 'monitor', stage: 'monitor',
+    key: 'monitor', label: 'Monitor Wall', short: 'MONITOR', group: 'monitor', stage: 'monitor',
     accent: '#f472b6',
     cam: { pos: [3.5, 8.6, 6.0], target: [19.4, 2.4, -6.2] },
   },
   {
-    key: 'finance', label: 'Vault & Ledger', group: 'finance', stage: 'close',
+    key: 'finance', label: 'Vault & Ledger', short: 'FINANCE', group: 'finance', stage: 'close',
     accent: '#34d399',
     cam: { pos: [-1.5, 9.2, 13.2], target: [-18.6, 2.3, 4.0] },
   },
 ]
+
+/**
+ * The 3D floor names only the *head* of each department: the highest-ranking
+ * agent in that station (ties break on score, then on seat order).  A promotion
+ * can therefore hand the name badge to a new agent, which is exactly what the
+ * office ladder means on the floor.  Everybody stays clickable.
+ */
+export function headsFor(bots: Bot[]): Partial<Record<StationKey, string>> {
+  const best: Partial<Record<StationKey, Bot>> = {}
+  const better = (a: Bot, b: Bot) => (a.rank_index !== b.rank_index
+    ? a.rank_index > b.rank_index
+    : a.metrics.score !== b.metrics.score
+      ? a.metrics.score > b.metrics.score
+      : a.slot < b.slot)
+  for (const bot of bots) {
+    const key = STATION_BY_GROUP[bot.group]
+    if (!key) continue
+    const cur = best[key]
+    if (!cur || better(bot, cur)) best[key] = bot
+  }
+  const out: Partial<Record<StationKey, string>> = {}
+  for (const key of Object.keys(best) as StationKey[]) out[key] = best[key]!.bot_id
+  return out
+}
 
 export const STATION_BY_GROUP: Record<string, StationKey> = {
   core: 'command', scanner: 'scan', analyst: 'analyze',

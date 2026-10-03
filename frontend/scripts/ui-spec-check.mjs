@@ -25,7 +25,6 @@ const REQUIRED = [
   ['realised P&L card', 'Realised P&L'],
   ['fees paid card', 'Fees Paid'],
   ['win rate card', 'Win Rate'],
-  ['collapsed menu shows short labels', 'Deck'],
   ['three-dot menu expander', 'Collapse menu'],
   ['Open Positions in the menu', 'Open Positions'],
   ['ROI trail badge on the main cards', 'trailing'],
@@ -33,7 +32,6 @@ const REQUIRED = [
   ['work-zone bays labelled', 'bay'],
   ['3D headquarters is the work zone', 'headquarters'],
   ['every station has a labelled bay', 'Verification Gate'],
-  ['agent card exists for a clicked body', 'agent card'],
   ['human reference credited', 'Renderpeople'],
   ['render quality toggle', 'cinematic'],
   ['licensed-scan drop-in slot', '/models/people'],
@@ -75,6 +73,11 @@ const RENDERED_ACCOUNT_OK = [
   ['rendered account: equity sheet', 'Equity sheet'],
   ['rendered account: ledger check', 'Ledger check'],
 ]
+const RENDERED_BOTS_OK = [
+  ['rendered roster: the trading office panel', 'Trading office'],
+  ['rendered roster: the promotion rule', 'promotion every'],
+  ['rendered roster: the office record', 'office record'],
+]
 const RENDERED_FORBIDDEN = [
   ['rendered deck: pipeline rail moved to Bot Roster', 'Pipeline stages'],
   ['rendered deck: closes tape moved to Closed Trades', 'Latest closes'],
@@ -84,6 +87,22 @@ const RENDERED_FORBIDDEN = [
 
 const get = async (url) => (await fetch(url)).text()
 
+/**
+ * How many text nodes the compact rail could still print: `n.label` / `n.hint`
+ * may only appear *inside* the `{menuOpen && …}` guard, so an unguarded word in
+ * the nav would push this count above 2.
+ */
+const navWords = (layout) => {
+  const nav = layout.slice(layout.indexOf('<nav'), layout.indexOf('</nav>'))
+  // only *printed* words count: title={n.label} is a tooltip, not menu text
+  const printed = nav.indexOf('>{n.label}<')
+  const hint = nav.indexOf('{n.hint}')
+  const guard = nav.indexOf('{menuOpen && (')
+  const other = nav.match(/>\s*[A-Za-z]{3,}\s*</g) || []      // stray prose in the rail
+  return (printed >= 0 && hint > printed && guard >= 0 && guard < printed
+          && other.length === 0) ? 2 : Infinity
+}
+
 /* ── source-level rule ──────────────────────────────────────────────────────
  * Minification eats identifiers, so a popup's lifetime cannot be asserted from
  * the bundle.  Read the store instead: every transient notification must expire
@@ -92,6 +111,14 @@ const get = async (url) => (await fetch(url)).text()
 const SOURCE_RULES = () => {
   const src = readFileSync(resolve(here, '../src/state/store.tsx'), 'utf8')
   const room = readFileSync(resolve(here, '../src/components/hq/furniture.tsx'), 'utf8')
+  const layout = readFileSync(resolve(here, '../src/components/Layout.tsx'), 'utf8')
+  const plan = readFileSync(resolve(here, '../src/components/hq/layout.ts'), 'utf8')
+  const hq = readFileSync(resolve(here, '../src/components/hq/HQ.tsx'), 'utf8')
+  const human = readFileSync(resolve(here, '../src/components/hq/Human.tsx'), 'utf8')
+  const bots = readFileSync(resolve(here, '../../backend/app/bots.py'), 'utf8')
+  const office = readFileSync(resolve(here, '../src/pages/Bots.tsx'), 'utf8')
+  /* the seven bays, by the short department name the floor draws */
+  const bays = ['COMMAND', 'SCAN', 'ANALYST', 'EXECUTE', 'VERIFY', 'MONITOR', 'FINANCE']
   /* the floor carries an architectural grid — fixed dimensions, never fed by
      trade or equity data (the rejected "down graph on the floor") */
   const gridLine = (room.match(/<gridHelper[^>]*>/g) || []).join('\n')
@@ -100,9 +127,40 @@ const SOURCE_RULES = () => {
       gridLine.length > 0 && !/curve|pnl|equity|series/i.test(gridLine)],
     ['notifications expire in exactly 3 s', /export const NOTIFY_MS = 3000\b/.test(src)],
     ['toasts use the shared 3 s timer', /setToasts[\s\S]{0,120}NOTIFY_MS/.test(src)],
-    ['top banner uses the shared 3 s timer', /setCelebration[\s\S]{0,120}NOTIFY_MS/.test(src)],
     ['no popup keeps a hand-written timer',
-      !/set(Toasts|Celebration|Promotions)[\s\S]{0,120},\s*(6000|7000|4200|5000|8000)\)/.test(src)],
+      !/set(Toasts|Promotions)[\s\S]{0,120},\s*(6000|7000|4200|5000|8000)\)/.test(src)],
+    // ── the operator's menu rule: glyphs when compact, words when expanded ──
+    ['collapsed rail carries symbols only',
+      navWords(layout) === 2 && !/shortLabel|const SHORT/.test(layout)],
+    // ── the top notification is gone for good ──────────────────────────────
+    ['no banner is raised over the dashboard',
+      !/CelebrationOverlay|setCelebration/.test(layout + src)],
+    ['win/loss reaction lives on the 3D floor',
+      /Sparkles/.test(hq) && /mood === 'sad'|set_mood|'sad'/.test(hq)],
+    // ── the 3D floor states the department, not its paperwork ─────────────
+    ['3D bays are labelled with short department names',
+      bays.every((b) => plan.includes(`short: '${b}'`)) && /label=\{st\.short\}/.test(hq)],
+    ['3D names only the head of each department',
+      /export function headsFor/.test(plan) && /heads\[station\] === bot\.bot_id/.test(hq)
+      && /label = isHead \|\| selected/.test(hq)],
+    ['agent badge is a name, not a status line',
+      !/· \{bot\.status\}/.test(human)],
+    ['no instruction text on the 3D floor',
+      !/drag to orbit/.test(hq)],
+    ['bay boards carry a headline, not a data dump',
+      /rows=\{\[\['assets'[^\]]*\]\]\}/.test(hq)
+      && /rows=\{\[\['open'[^\]]*\]\]\}/.test(hq)
+      && !/bar closes|trail armed|margin used/.test(
+        hq.slice(hq.indexOf('small board over the scanner bay'), hq.indexOf('floor zones')))],
+    // ── the office ladder: 20 units per level, replace what fails ─────────
+    ['promotion is earned every 20 completed units',
+      /PROMOTE_EVERY = 20\b/.test(bots) && /completed_trades/.test(bots)],
+    ['a failing agent is replaced and the seat re-filled',
+      /def office_pass/.test(bots) && /def _hire/.test(bots) && /def _fire/.test(bots)
+      && /should_retire/.test(bots)],
+    ['the office ladder is on the roster page',
+      /Trading office/.test(office) && /office ladder/.test(office)
+      && /next_level_in/.test(office)],
   ]
 }
 
@@ -158,6 +216,18 @@ const main = async () => {
         const ok = !flat.includes(needle)
         if (!ok) bad++
         console.log(`${ok ? '✓' : '✗'} ${label}`)
+      }
+      const botsPage = out.split('───── Bots ─────')[1]?.split('─────')[0] || ''
+      if (!botsPage) {
+        bad++
+        console.log('✗ could not render the Bot Roster page for the structural pass')
+      } else {
+        const bflat = botsPage.replace(/\s+/g, ' ')
+        for (const [label, needle] of RENDERED_BOTS_OK) {
+          const ok = bflat.includes(needle)
+          if (!ok) bad++
+          console.log(`${ok ? '✓' : '✗'} ${label}`)
+        }
       }
       const acct = out.split('───── Account ─────')[1]?.split('─────')[0] || ''
       if (!acct) {

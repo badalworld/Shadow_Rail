@@ -491,10 +491,8 @@ export const Human: React.FC<HumanProps> = ({
               letterSpacing: '0.03em',
               boxShadow: selected ? `0 0 14px ${accent}66` : undefined,
             }}>
+            {/* name only — the floor is not a status board */}
             <span style={{ color: accent }}>{bot.name}</span>
-            <span className="dim"> · {bot.status}</span>
-            {bot.mood === 'happy' && ' 🎉'}
-            {bot.mood === 'sad' && ' 💧'}
           </div>
         </Html>
       )}

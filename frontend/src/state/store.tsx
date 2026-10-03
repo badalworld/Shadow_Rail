@@ -3,7 +3,8 @@ import React, {
 } from 'react'
 import { endpoints, wsUrl } from '../lib/api'
 import type {
-  ApiState, Bot, EquityState, Link, LogRow, ScanRow, Stats, Trade, WsEvent, EngineStatus,
+  ApiState, Bot, EquityState, Link, LogRow, OfficeLadder, ScanRow, Stats, Trade, WsEvent,
+  EngineStatus,
 } from '../lib/types'
 
 export interface Toast {
@@ -13,14 +14,6 @@ export interface Toast {
   body?: string
 }
 
-export interface Celebration {
-  id: number
-  win: boolean
-  symbol: string
-  net: number
-  reason: string
-  message: string
-}
 
 interface StoreShape {
   status: EngineStatus | null
@@ -37,8 +30,8 @@ interface StoreShape {
   sos: { active: boolean; level: string; reasons: string[]; since: number }
   pulses: { id: number; from: string; to: string; stage: string }[]
   toasts: Toast[]
-  celebration: Celebration | null
   promotions: { id: number; name: string; from: string; to: string }[]
+  office: OfficeLadder | null
   refresh: () => void
   pushToast: (t: Omit<Toast, 'id'>) => void
   dismissToast: (id: number) => void
@@ -56,6 +49,7 @@ export const NOTIFY_MS = 3000
  * websocket sends on connect) so the first paint already shows live numbers
  * instead of a flash of zeros while the socket handshakes.                */
 type Boot = {
+  office?: OfficeLadder
   status?: EngineStatus
   bots?: Bot[]
   links?: Link[]
@@ -102,8 +96,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [sos, setSos] = useState({ active: false, level: 'none', reasons: [] as string[], since: 0 })
   const [pulses, setPulses] = useState<StoreShape['pulses']>([])
   const [toasts, setToasts] = useState<Toast[]>([])
-  const [celebration, setCelebration] = useState<Celebration | null>(null)
   const [promotions, setPromotions] = useState<StoreShape['promotions']>([])
+  const [office, setOffice] = useState<OfficeLadder | null>(BOOT.office ?? null)
   const botMapRef = useRef<Record<string, Bot>>({})
 
   const pushToast = useCallback((t: Omit<Toast, 'id'>) => {
@@ -119,10 +113,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const refresh = useCallback(async () => {
     try {
-      const [st, eq, ot, sc, bt] = await Promise.all([
+      const [st, eq, ot, sc, bt, of] = await Promise.all([
         endpoints.status(), endpoints.equity(), endpoints.openTrades(),
-        endpoints.scan(), endpoints.bots(),
+        endpoints.scan(), endpoints.bots(), endpoints.office(),
       ])
+      setOffice(of)
       setStatus(st.status)
       setBots(st.bots || bt.bots)
       setLinks(st.links || bt.links || [])
@@ -255,12 +250,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           refreshTrades()
           break
         case 'celebration':
-          setCelebration({
-            id: uid++, win: !!d.win, symbol: d.symbol, net: d.net || 0,
-            reason: d.reason || '', message: d.message || '',
-          })
-          setTimeout(() => setCelebration((c) => (c && c.id === uid - 1 ? null : c)), NOTIFY_MS)
+          // the win/loss reaction lives on the 3D floor (bot moods + sparkles);
+          // no banner is raised over the dashboard
           refreshTrades()
+          break
+        case 'office.update':
+          refresh()
           break
         case 'link.pulse':
           setPulses((prev) => [...prev.slice(-14), { id: uid++, from: d.from, to: d.to, stage: d.stage }])
@@ -303,7 +298,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const value: StoreShape = {
     status, bots, botMap, links, equity, api, logs, openTrades, scan, stats,
-    connected, sos, pulses, toasts, celebration, promotions,
+    connected, sos, pulses, toasts, promotions, office,
     refresh, pushToast, dismissToast,
   }
 

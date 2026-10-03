@@ -9,7 +9,6 @@ import { useStore } from '../state/store'
 import { endpoints } from '../lib/api'
 import { Chip, statusColor } from './Glass'
 import { Toasts } from './Toasts'
-import { CelebrationOverlay } from './Celebration'
 
 export type PageKey = 'dashboard' | 'positions' | 'account' | 'scan' | 'trades' | 'bots' | 'logs'
   | 'settings' | 'about'
@@ -25,20 +24,6 @@ const NAV: { key: PageKey; label: string; icon: React.ReactNode; hint: string }[
   { key: 'settings', label: 'Settings', icon: <SettingsIcon size={19} />, hint: 'Keys, risk, IP' },
   { key: 'about', label: 'About', icon: <Info size={19} />, hint: 'Developer' },
 ]
-
-/** Compact rail labels — the collapsed menu shows these instead of the full name. */
-const SHORT: Record<string, string> = {
-  'Command Deck': 'Deck',
-  'Open Positions': 'Open',
-  'Account': 'Account',
-  'Market Scan': 'Scan',
-  'Closed Trades': 'Trades',
-  'Bot Roster': 'Bots',
-  'Workflow Log': 'Logs',
-  'Settings': 'Setup',
-  'About': 'About',
-}
-const shortLabel = (label: string) => SHORT[label] ?? label.split(' ')[0]
 
 export const Layout: React.FC<{
   page: PageKey
@@ -70,7 +55,7 @@ export const Layout: React.FC<{
       {/* ───────────────────────── sidebar ───────────────────────── */}
       <aside
         className="glass m-3 mr-0 flex shrink-0 flex-col overflow-hidden p-2.5 transition-[width] duration-300"
-        style={{ width: menuOpen ? '15.5rem' : '6.1rem' }}>
+        style={{ width: menuOpen ? '15.5rem' : '4.35rem' }}>
 
         {/* header: logo (always) + ⋯ to expand the full menu */}
         <div className="flex items-center gap-2">
@@ -104,23 +89,24 @@ export const Layout: React.FC<{
             const active = page === n.key
             return (
               <button key={n.key} onClick={() => setPage(n.key)} title={n.label}
-                className="group relative flex items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition-all"
+                aria-label={n.label}
+                className={`group relative flex items-center rounded-xl py-2.5 text-left transition-all ${
+                  menuOpen ? 'gap-3 px-2.5' : 'justify-center px-0'}`}
                 style={{
                   background: active ? 'color-mix(in oklab, var(--sr-accent) 14%, transparent)' : 'transparent',
                   border: `1px solid ${active ? 'color-mix(in oklab, var(--sr-accent) 40%, transparent)' : 'transparent'}`,
                   cursor: 'pointer',
                 }}>
-                <span className="flex h-6 w-6 shrink-0 items-center justify-center"
-                  style={{ color: active ? 'var(--sr-accent)' : 'var(--sr-dim)' }}>{n.icon}</span>
-                {menuOpen ? (
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg"
+                  style={{
+                    color: active ? 'var(--sr-accent)' : 'var(--sr-dim)',
+                    background: active ? undefined : 'transparent',
+                  }}>{n.icon}</span>
+                {/* collapsed = symbol only; the ⋯ expander brings the text back */}
+                {menuOpen && (
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[0.82rem] font-medium">{n.label}</span>
                     <span className="block truncate text-[0.6rem] dim">{n.hint}</span>
-                  </span>
-                ) : (
-                  <span className="truncate text-[0.62rem] uppercase tracking-wide"
-                    style={{ color: active ? 'var(--sr-text)' : 'var(--sr-dim)' }}>
-                    {shortLabel(n.label)}
                   </span>
                 )}
                 {active && <span className="absolute right-1 h-5 w-[2px] rounded-full"
@@ -300,7 +286,6 @@ export const Layout: React.FC<{
       </main>
 
       <Toasts />
-      <CelebrationOverlay />
     </div>
   )
 }

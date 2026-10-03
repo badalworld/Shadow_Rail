@@ -27,7 +27,7 @@ async function capture() {
   const paths = [
     '/api/status', '/api/health', '/api/config', '/api/ip', '/api/equity',
     '/api/equity/curve?limit=400', '/api/stats', '/api/trades/open',
-    '/api/trades/closed?limit=60', '/api/scan', '/api/bots', '/api/logs?limit=120',
+    '/api/trades/closed?limit=60', '/api/scan', '/api/bots', '/api/office', '/api/logs?limit=120',
     '/api/about', '/api/events', '/api/indicator/selftest',
   ]
   const out = {}

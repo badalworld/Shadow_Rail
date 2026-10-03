@@ -1,15 +1,15 @@
 import React, { useMemo, useState } from 'react'
-import { Award, Crown, Filter } from 'lucide-react'
+import { Award, BriefcaseBusiness, Crown, Filter, UserMinus, UserPlus } from 'lucide-react'
 import { WORKFLOW_STAGES, useStore } from '../state/store'
 import { endpoints } from '../lib/api'
 import { Bar, Chip, Panel, fmtNum, moodEmoji, statusColor, timeAgo } from '../components/Glass'
 import { BotAvatar } from '../components/BotAvatar'
-import type { Bot } from '../lib/types'
+import type { Bot, OfficeEvent } from '../lib/types'
 
 const RANK_ORDER = ['Recruit', 'Operative', 'Specialist', 'Elite', 'Legend']
 
 export const Bots: React.FC = () => {
-  const { bots, botMap, api, pushToast, status } = useStore()
+  const { bots, botMap, api, office, pushToast, status } = useStore()
   const [group, setGroup] = useState('all')
   const [selected, setSelected] = useState<string | null>(null)
   const [detail, setDetail] = useState<any>(null)
@@ -61,6 +61,68 @@ export const Bots: React.FC = () => {
         </div>
       </Panel>
 
+      {/* ── the trading office: the ladder, the hires and the firings ──── */}
+      <Panel
+        title="Trading office"
+        right={
+          <div className="flex flex-wrap items-center gap-2">
+            <Chip color="var(--color-cyan)">
+              promotion every {office?.summary.promote_every ?? 20}{' '}
+              {office?.summary.units.trade ? 'trades' : 'units'}
+            </Chip>
+            <Chip>avg level {office?.summary.avg_level ?? 1}</Chip>
+            <Chip color="var(--color-bull)">
+              <UserPlus size={10} /> {office?.summary.hires ?? 0} hired
+            </Chip>
+            <Chip color="var(--color-amber)">
+              <UserMinus size={10} /> {office?.summary.retired ?? 0} replaced
+            </Chip>
+          </div>
+        }
+        bodyClass="p-2"
+      >
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-[1.1fr_1fr]">
+          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 xl:grid-cols-4">
+            {Object.entries(office?.summary.levels ?? {}).map(([g, l]) => (
+              <div key={g} className="glass-row px-2 py-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[0.62rem] uppercase tracking-wider dim">{g}</span>
+                  <span className="mono text-[0.62rem]">Lv {l.avg}</span>
+                </div>
+                <div className="mt-1"><Bar value={(l.avg / 5) * 100} height={4} /></div>
+                <div className="mt-1 text-[0.55rem] dim">
+                  {office?.summary.by_group[g] ?? 0} agents · max Lv {l.max}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="glass-row scroll-thin max-h-[7.5rem] overflow-auto px-2.5 py-2">
+            <div className="mb-1 text-[0.58rem] uppercase tracking-wider dim">
+              office record — promotions, holds, hires, firings
+            </div>
+            {(office?.log || []).slice(0, 20).map((e, i) => (
+              <div key={`${e.at}-${i}`} className="flex items-center gap-1.5 py-0.5 text-[0.62rem]">
+                <OfficeBadge kind={e.kind} />
+                <span className="truncate">
+                  <span style={{ color: e.kind === 'fire' ? 'var(--color-bear)'
+                    : e.kind === 'hire' ? 'var(--color-bull)' : 'var(--sr-accent)' }}>
+                    {e.name}
+                  </span>{' '}
+                  {officeLine(e)}
+                </span>
+                <span className="ml-auto shrink-0 text-[0.55rem] dim">{timeAgo(e.at)}</span>
+              </div>
+            ))}
+            {!office?.log?.length && (
+              <div className="text-[0.62rem] dim">
+                No promotions yet — a seat levels up every{' '}
+                {office?.summary.promote_every ?? 20} completed units.
+              </div>
+            )}
+          </div>
+        </div>
+      </Panel>
+
       <div className="flex flex-wrap items-center gap-2">
         <Chip color="var(--color-bull)">{bots.length} agents online</Chip>
         <Chip color="var(--color-cyan)">{bots.filter((b) => b.status === 'working').length} working</Chip>
@@ -95,7 +157,7 @@ export const Bots: React.FC = () => {
                     </span>
                     {b.rank_index >= 3 && <Crown size={11} style={{ color: 'var(--color-amber)' }} />}
                     <span className="ml-auto mono text-[0.6rem] dim">
-                      {moodEmoji(b.mood)} {b.rank}
+                      {moodEmoji(b.mood)} Lv{b.rank_index + 1} {b.rank}
                     </span>
                   </div>
                   <div className="truncate text-[0.62rem] dim">{b.role}</div>
@@ -106,11 +168,18 @@ export const Bots: React.FC = () => {
                     <span className="truncate text-[0.6rem] dim">· {b.task}</span>
                   </div>
                   <div className="mt-1.5"><Bar value={b.progress * 100} height={4} color={statusColor(b.status)} /></div>
+                  <div className="mt-1.5 flex items-center gap-1.5 text-[0.55rem] dim">
+                    <BriefcaseBusiness size={10} />
+                    <span className="truncate">
+                      {b.completed_units ?? 0}/{b.promote_every ?? 20} {b.unit ?? 'trade'}s
+                      → next rank in {b.next_level_in ?? 20}
+                    </span>
+                  </div>
                   <div className="mt-1.5 grid grid-cols-4 gap-1 text-[0.56rem] dim">
                     <span>tasks <span className="mono">{b.metrics.tasks_done}</span></span>
                     <span>score <span className="mono">{b.metrics.score.toFixed(0)}</span></span>
                     <span>W/L <span className="mono">{b.metrics.wins}/{b.metrics.losses}</span></span>
-                    <span>api <span className="mono">{b.metrics.api_spent_window}</span></span>
+                    <span>load <span className="mono">{b.capacity ?? '—'}</span></span>
                   </div>
                 </div>
               </button>
@@ -142,7 +211,31 @@ export const Bots: React.FC = () => {
 
               <div>
                 <div className="mb-1 flex justify-between text-[0.62rem] dim">
-                  <span>field rank progress</span><span className="mono">{bot.metrics.score.toFixed(1)} / 100</span>
+                  <span>
+                    office ladder — {bot.completed_units ?? 0} completed {bot.unit ?? 'trade'}s
+                  </span>
+                  <span className="mono">
+                    next rank in {bot.next_level_in ?? 20} · load {bot.capacity ?? '—'}/cycle
+                  </span>
+                </div>
+                <Bar value={((bot.completed_units ?? 0) % (bot.promote_every ?? 20))
+                  / (bot.promote_every ?? 20) * 100} color={bot.color} glow />
+                <div className="mt-1 flex justify-between text-[0.55rem] dim">
+                  <span>
+                    {bot.founder === false
+                      ? `agent #${(bot.generation ?? 1)} in this seat (hired by the office)`
+                      : 'founding agent'}
+                  </span>
+                  <span className="mono">
+                    quality {bot.quality_ok === false ? 'held' : 'ok'} · fail{' '}
+                    {((bot.metrics.fail_ratio ?? 0) * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-1 flex justify-between text-[0.62rem] dim">
+                  <span>performance score</span><span className="mono">{bot.metrics.score.toFixed(1)} / 100</span>
                 </div>
                 <Bar value={bot.metrics.score} color={bot.color} glow />
                 <div className="mt-1 flex justify-between text-[0.55rem] dim">
@@ -227,4 +320,26 @@ export const Bots: React.FC = () => {
       </div>
     </div>
   )
+}
+
+/** One glyph per office event so the record scans in a single glance. */
+const OfficeBadge: React.FC<{ kind: OfficeEvent['kind'] }> = ({ kind }) => {
+  const map: Record<string, { icon: React.ReactNode; color: string; title: string }> = {
+    promote: { icon: <Award size={11} />, color: 'var(--color-bull)', title: 'promoted' },
+    hold: { icon: <BriefcaseBusiness size={11} />, color: 'var(--color-amber)', title: 'level held' },
+    hire: { icon: <UserPlus size={11} />, color: 'var(--color-bull)', title: 'hired' },
+    fire: { icon: <UserMinus size={11} />, color: 'var(--color-bear)', title: 'replaced' },
+  }
+  const e = map[kind] || map.promote
+  return <span className="shrink-0" title={e.title} style={{ color: e.color }}>{e.icon}</span>
+}
+
+const officeLine = (e: OfficeEvent): string => {
+  switch (e.kind) {
+    case 'promote': return `promoted ${e.from} → ${e.to} (${e.completed_units} ${e.unit}s)`
+    case 'hold': return `held at ${e.rank} — reliability below the gate`
+    case 'hire': return `hired into ${e.seat || 'the floor'} at ${e.rank} (agent #${e.generation})`
+    case 'fire': return `replaced — ${e.tasks_failed} failed of ${(e.tasks_done || 0) + (e.tasks_failed || 0)} tasks`
+    default: return ''
+  }
 }

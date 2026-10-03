@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .bots import build_registry, workflow_links
+from .bots import PROMOTE_EVERY, build_registry, workflow_links
 from .bus import BUS
 from .config import STORE, WEB_DIR, mask
 from .db import DB
@@ -397,7 +397,33 @@ async def bots() -> dict:
     e = eng()
     return {"bots": e.registry.snapshot(GOVERNOR.snapshot()),
             "links": workflow_links(),
+            "office": e.registry.office_summary(),
             "ranks": ["Recruit", "Operative", "Specialist", "Elite", "Legend"]}
+
+
+@app.get("/api/office")
+async def office() -> dict:
+    """The trading office: the ladder, the record and the hiring rules."""
+    reg = eng().registry
+    return {
+        "summary": reg.office_summary(),
+        "rules": {
+            "promote_every": PROMOTE_EVERY,
+            "unit": "a closed trade for the trade seats, a served cycle for support seats",
+            "hold": "a bot whose failure ratio is above 30% is held at its rank",
+            "fire": "20+ tasks, 12+ failures and a failure ratio above 55% costs the seat",
+            "hire": "the seat is re-filled with a fresh agent at Recruit, same desk",
+        },
+        "retired": reg.retired[:24],
+        "log": reg.office_log[:40],
+        "seats": [{"bot_id": b.bot_id, "name": b.name, "group": b.group,
+                   "role": b.role, "rank": b.rank, "level": b.rank_index + 1,
+                   "unit": b.unit, "completed_units": b.completed_units,
+                   "next_level_in": b.next_level_in, "capacity": b.capacity,
+                   "generation": b.generation, "founder": b.founder,
+                   "fail_ratio": round(b.metrics.fail_ratio, 3),
+                   "assigned": len(b.assigned)} for b in reg.all()],
+    }
 
 
 @app.get("/api/bots/{bot_id}")
@@ -412,16 +438,16 @@ async def bot_detail(bot_id: str) -> dict:
 
 @app.post("/api/bots/{bot_id}/promote")
 async def promote_bot(bot_id: str) -> dict:
-    bot = eng().registry.get(bot_id)
+    """Operator merit promotion — a bonus rank the 20-unit rule will not undo."""
+    e = eng()
+    bot = e.registry.get(bot_id)
     if not bot:
         raise HTTPException(404, "unknown bot")
-    if bot.rank_index < 4:
-        bot.rank_index += 1
-        bot.promotions += 1
-        BUS.publish("bot.promoted", {"bot_id": bot_id, "name": bot.name, "to": bot.rank,
-                                     "manual": True, "at": now_ms()})
-    eng().registry.publish(bot_id, GOVERNOR.snapshot())
-    return {"bot": bot.as_dict(GOVERNOR.snapshot())}
+    rec = e.registry.merit_promote(bot_id, "operator merit promotion")
+    if rec:
+        e._rebalance_workload()
+    e.registry.publish(bot_id, GOVERNOR.snapshot())
+    return {"bot": bot.as_dict(GOVERNOR.snapshot()), "promotion": rec}
 
 
 # ═════════════════════════════════════════════════════════════════ logs
@@ -609,7 +635,11 @@ async def boot_payload() -> dict[str, Any]:
             "ip": await ip_info(),
             "curve": await JOURNAL.cumulative_pnl(limit=400),
             "logs": await DB.query_logs(limit=80),
-            "links": workflow_links()}
+            "links": workflow_links(),
+            "office": {"summary": e.registry.office_summary(),
+                       "retired": e.registry.retired[:24],
+                       "log": e.registry.office_log[:40],
+                       "rules": {"promote_every": PROMOTE_EVERY}}}
 
 
 @app.get("/")

@@ -13,6 +13,63 @@ export interface BotMetrics {
   api_spent_total: number
   api_blocked: number
   score: number
+  fail_ratio?: number
+}
+
+/** One seat in the trading office: the desk (bot_id) and the agent in it. */
+export interface OfficeSeat {
+  bot_id: string
+  name: string
+  group: string
+  role: string
+  rank: string
+  level: number
+  unit: 'trade' | 'cycle'
+  completed_units: number
+  next_level_in: number
+  capacity: number
+  generation: number
+  founder: boolean
+  fail_ratio: number
+  assigned: number
+}
+
+export interface OfficeEvent {
+  kind: 'promote' | 'hold' | 'fire' | 'hire'
+  bot_id: string
+  name: string
+  from?: string
+  to?: string
+  rank?: string
+  level?: number
+  seat?: string
+  unit?: string
+  completed_units?: number
+  tasks_done?: number
+  tasks_failed?: number
+  fail_ratio?: number
+  generation?: number
+  reason?: string
+  at: number
+}
+
+export interface OfficeLadder {
+  summary: {
+    agents: number
+    promote_every: number
+    units: { trade: number; cycle: number }
+    by_group: Record<string, number>
+    avg_level: number
+    levels: Record<string, { avg: number; max: number; min: number }>
+    next_level_in: Record<string, number>
+    retired: number
+    hires: number
+    recent: OfficeEvent[]
+  }
+  rules: Record<string, string | number>
+  retired: OfficeEvent[]
+  log: OfficeEvent[]
+  seats: OfficeSeat[]
 }
 
 export interface Bot {
@@ -34,6 +91,19 @@ export interface Bot {
   metrics: BotMetrics
   assigned: string[]
   last_active: number
+  /** office ladder — how far this agent is from its next promotion */
+  unit?: 'trade' | 'cycle'
+  completed_units?: number
+  completed_trades?: number
+  completed_cycles?: number
+  promote_every?: number
+  next_level_in?: number
+  capacity?: number
+  workload_weight?: number
+  quality_ok?: boolean
+  founder?: boolean
+  generation?: number
+  hired_at?: number
 }
 
 export interface Link {

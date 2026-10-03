@@ -104,7 +104,19 @@ export const About: React.FC = () => {
               <li>• The Info Bot verifies position, quantity, stop and target before the monitors take over.</li>
               <li>• Trade Manager keeps history, P&L, win-rate, fees and funding; Equity Manager releases
                 8% of equity as margin at 10× cross.</li>
-              <li>• Wins make the swarm celebrate; losses make it mourn; sustained good work earns promotions.</li>
+              <li>• Wins make the swarm celebrate; losses make it mourn.</li>
+              <li>• <b>The office ladder</b> — every seat earns its next field rank
+                (Recruit → Operative → Specialist → Elite → Legend) every 20 completed units: a
+                closed trade it carried for the scanner / analyst / execution / monitor seats, a
+                served workflow cycle for the support seats. A level-up raises the load the agent is
+                trusted with — a promoted scanner sweeps more of the universe, a promoted monitor
+                carries more of the book.</li>
+              <li>• <b>The reliability gate</b> — a bot whose failure ratio is above 30 % is held at
+                its rank until it recovers, however many units it has banked.</li>
+              <li>• <b>Hiring and firing</b> — an agent with 20+ tasks, 12+ failures and a failure
+                ratio above 55 % is relieved of duty; the office hires a fresh agent into the same
+                desk at Recruit, so no bay is ever short-staffed. Fired agents stay on the record in
+                <i> Bot Roster → Trading office</i>.</li>
             </ul>
           </Panel>
         </div>
