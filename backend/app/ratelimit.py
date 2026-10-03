@@ -15,7 +15,6 @@ import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque
 
 # Real Binance USDT-M weight costs used by this engine.
 WEIGHTS: dict[str, int] = {
@@ -76,7 +75,7 @@ class WeightGovernor:
     allow_critical_above_cap: bool = False
     window_s: float = 60.0
 
-    _events: Deque[tuple[float, int]] = field(default_factory=deque)
+    _events: deque[tuple[float, int]] = field(default_factory=deque)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _budgets: dict[str, BotBudget] = field(default_factory=dict)
     _peak_pct: float = 0.0

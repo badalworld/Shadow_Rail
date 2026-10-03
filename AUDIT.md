@@ -1,145 +1,159 @@
-# Shadow Rail — full code & engine audit
+# Shadow Rail — full code & engine audit (round 2)
 
-Date: 2026-10-04 · branch `arena/01a10287-shadow-rail` (PR #1) · scope: whole repository
-(backend engine, exchange clients, indicator port, tests, dashboard) plus a live
-end-to-end run of the engine.
+Date: 2026-10-03 · branch `arena/01a1037b-shadow-rail` · scope: whole repository —
+deprecation sweep (Python + Node toolchain), dependency security, and a live
+speed test of every hot path (engine cycles, scanner sweeps, dashboard page
+load, websocket boot frame, database), with everything slow fixed and
+re-measured.
+
+Round 1 (dead code, duplicated bodies, indicator-port bugs) is in the git
+history of this file; its static findings remain at **0** — re-verified.
 
 Re-run everything with:
 
 ```bash
 /home/user/.venv/bin/python scripts/audit.py --strict      # static audit, CI-ready
 /home/user/.venv/bin/python -m pyflakes backend/app backend/tests
-/home/user/.venv/bin/python -m pytest backend/tests -q
+/home/user/.venv/bin/python -m pytest backend/tests -q     # 114 tests, 0 warnings
 cd frontend && npx tsc --noEmit && npm run build && npm run ui:check && npm run hq:audit
+cd frontend && node scripts/ssr-smoke.mjs capture && node scripts/ssr-smoke.mjs
 ```
 
 ---
 
-## 1. Result
+## 1. Deprecations found → fixed
 
-| Section | Before | After |
+| Where | Deprecation | Fix |
 |---|---|---|
-| Dead imports / unused locals (pyflakes) | 40 | **0** |
-| Module-level names nothing uses | 29 | **0** |
-| Orphan modules / files | 0 | 0 |
-| Unused frontend exports | 3 | **0** |
-| Duplicate function bodies | 2 | **0** |
-| Duplicated 14-line blocks | 4 groups (2 false) | **0** |
-| Leftover markers (`TODO`/`FIXME`/`HACK`/`XXX`) | 0 | 0 |
-| **Total** | **75** | **0** |
+| `backend/app/api.py` | `@app.on_event("startup")` / `@app.on_event("shutdown")` — FastAPI has deprecated `on_event` in favour of lifespan handlers (emits `DeprecationWarning` on import; it had been silently hidden by the pytest filter below) | Replaced with an `@asynccontextmanager lifespan()` passed to `FastAPI(lifespan=…)`; the startup/shutdown bodies are unchanged |
+| `backend/pytest.ini` | `filterwarnings = ignore::DeprecationWarning` — a blanket suppression that is exactly how the `on_event` deprecation above went unnoticed | Removed. The suite now runs with deprecation warnings **visible and at zero** |
+| `backend/app/bus.py`, `backend/app/ratelimit.py` | `typing.Deque` — deprecated since Python 3.9 (PEP 585) | Annotations now use `collections.deque[…]` |
+| `backend/requirements.txt` (test deps) | starlette 1.7's `TestClient` warns `Using httpx with starlette.testclient is deprecated; install httpx2 instead` on every test run | `httpx2>=2.0` added to the dev/test requirements; the warning is gone and the suite is warning-clean |
+| `frontend/package.json` | vite 5.4.21 depends on esbuild ≤ 0.24.2 → **GHSA-67mh-4wv8-2f99** (dev-server request-forgery, moderate) flagged by `npm audit` | Upgraded to **vite 6.4.3** (patched, same major: no breaking changes for this build) — `npm audit` now reports **0 vulnerabilities** |
 
-Everything below was found by the audit, fixed, and re-verified; no finding was
-suppressed by an allowlist except framework-called HTTP/websocket handlers
-(FastAPI calls them, the source never does).
+Nothing else in either stack uses a deprecated API: a repo-wide grep for
+`utcnow / on_event / @validator / from_orm / parse_obj / typing.Deque /
+pkg_resources / distutils / ReactDOM.render / findDOMNode / componentWill /
+defaultProps` (plus three.js' removed `Geometry`/`outputEncoding`/`useLegacyLights`
+family) comes back clean, and every backend module imports cleanly with
+`-W error::DeprecationWarning`. The 3D component tree was reviewed for
+per-frame allocation problems — it already memoises geometries, mutates via
+refs and disposes GPU resources; nothing to fix there.
 
-## 2. Real bugs fixed
+## 2. Speed test → what was slow, and the fixes
 
-| Where | Problem | Fix |
+All "before" numbers measured on this machine (2 vCPU) against a live
+simulation engine; "after" numbers re-measured the same way after the fixes.
+
+### 2.1 Scanner sweeps / engine cycles — the engine's CPU bill
+
+**Symptom:** each 5-minute cycle spent **3.4–5.5 s** sweeping the 150-symbol
+universe (5 "parallel" scanner bots — but the indicator is pure-Python loops,
+so the GIL serialises them; the sweep cost is single-thread speed × 150).
+
+**Fix:** `indicators/ghost.py::compute()` and `indicators/pine.py` (the
+`ema`/`rma`/`sma`/`rolling_sum`/`true_range` cores) now run their sequential
+stages on plain Python floats instead of numpy scalar indexing (an order of
+magnitude cheaper per iteration); vector-friendly stages stay vectorised.
+
+**Correctness proof (this is the trading signal, so it is held to
+bit-for-bit parity):** a harness compares the new implementation against the
+previous one (reconstructed from git) over **96 cases** — 8 datasets
+(trending / high-vol / gap / flat markets, 64–1500 bars, zero-volume bars) ×
+12 parameter grids (all ghost placements, MTF gate on/off, strong-flip filter,
+varied swing bars) — comparing **every output array bitwise, NaN payloads
+included**: **0 mismatches**. The indicator self-test values (flips, rail
+bars, clean ratio, ATR) are unchanged to the last digit, and all 114 tests
+pass.
+
+| Metric | Before | After |
 |---|---|---|
-| `exchange/sim.py:199` | `_advance(self, s: "SymbolState", …)` referenced a name that does not exist — any tool that resolves annotations (`typing.get_type_hints`, model rebuilds) would raise `NameError`. | Annotation is `SimSymbol`. |
-| `engine.py:728` | `f"sweep complete"` — f-string with no placeholders. | Plain string. |
-| `engine.py:880` | `stats = await self.journal.refresh_stats()` bound a value nobody read. | The call stays (it keeps the dashboard stats hot), the dead binding is gone. |
-| `engine.py:1286` | `sl_roi` computed on every monitor tick and thrown away — the payload already carries `stop_roi_pct`. | Dead computation removed. |
-| `indicators/ghost.py:299` | `slo = shadow_lo[i - 1]` read in the Shadow Rail state machine but never used (the loop already carries its state exactly like Pine's `var`). | Dead read removed; the ported maths and all indicator tests are unchanged. |
-| `api.py:548` | `e = eng()` in the websocket handler never used (`boot_payload()` builds its own engine handle). | Dead line removed. |
+| `ghost.compute()` (1000 bars) | 23.4 ms | **5.0 ms** (4.7×) |
+| Scanner bot sweep (per bot) | 3.4–4.0 s | **0.8–1.1 s** |
+| Full engine cycle | 3.9–5.5 s | **0.94–1.22 s** (avg 1.12 s) |
 
-## 3. Dead code removed (with reasons)
+### 2.2 Dashboard first paint — external HTTP on the critical path
 
-* **`exchange/base.py`** — `MarketData` and `Broker` Protocols: no implementation
-  names them and nothing type-checks against them. The concrete clients are the
-  contract.
-* **`exchange/sim.py`** — `SimBroker = SimExchange` compatibility alias (no
-  references) and `MAKER_FEE` (the simulator always fills as a taker, so only
-  `TAKER_FEE` applies).
-* **`risk.py`** — `validate_notional()` and `apply_slippage_guard()`: both were
-  *superseded* copies of live logic — min qty / min notional are enforced in
-  `plan_sizing()` (which also owns the step floor, max-qty clamp and the
-  `min_notional_override`), and fill sanity is handled by the executor's
-  fill-drift recompute. Removed and replaced with an in-code note so a second,
-  divergent copy cannot creep back in.
-* **`indicators/pine.py`** — `na_mask`, `lowest`, `crossunder`: primitives the
-  Ghost Candle port never calls.
-* **`util.py`** — `iso`, `last_closed_open_ms`, `safe_div`, `aggregate` (+ its
-  private `_merge`), `fmt_money`, `chunked`, `now_iso`, `percentile`: none had a
-  caller anywhere (backend, tests, or frontend).
-* **`frontend`** — unused exports `Sparkline`, `MiniMeter` (`Charts.tsx`) and
-  `Ring` (`Glass.tsx`); the dashboard still builds and renders identically.
-* Unused imports / locals across `api.py`, `engine.py`, `db.py`, `journal.py`,
-  `risk.py`, `exchange/hub.py`, `exchange/sim.py`, `indicators/ghost.py` and the
-  five test modules.
+**Symptom:** `public_ip()` fired up to **three external HTTP calls (6 s
+timeout each)** on **every page load and every websocket hello** (the boot
+frame inlines `ip_info()`). On a firewalled host that is up to 18 s added to
+first paint, and even on a healthy host it is a third-party round-trip in
+front of the UI.
 
-## 4. Duplicate code removed
+**Fix:** the probe result is now cached — success for 10 minutes, failure for
+2 (negative cache, so a firewalled host also stops paying), single-flight
+under a lock, and the per-URL timeout dropped to 2.5 s. The rendered
+`index.html` is likewise cached by (mtime, size) instead of re-read from disk
+per request.
 
-`binance.py` and `sim.py` each carried byte-identical `stop_market()` and
-`take_profit_market()` bodies that differed only in the order type literal. Each
-client now has **one** `_conditional_market(type, …)` path, so the two
-protective order payloads can never drift apart. This matters for a hard project
-rule: exactly one TP/SL system is active per position, never doubled.
+| Metric | Before | After |
+|---|---|---|
+| `GET /` (warm) | 71–90 ms + up to 18 s worst-case external stall | **10–14 ms**, never stalls (63 ms cold) |
+| `GET /api/ip` (repeat) | fresh probe every call | **~1 ms** cached |
+| websocket hello (full boot frame) | + external IP probe | **33 ms** |
 
-## 5. Audit tool
+### 2.3 Database hot paths — Python-side aggregation over the whole journal
 
-`scripts/audit.py` is part of the repo (`--strict` exits non-zero on any
-finding). Three deliberate hardening passes were needed before its output could
-be trusted:
+**Symptom (measured on a seeded 5,000-trade journal + 60 k log rows):**
+`stats_summary()` loaded **every closed trade into Python** to compute sums —
+22.9 ms per call, on a path hit every 5 s by the equity loop and by
+`/api/stats`; `reconcile_exchange()` did the same every 30 s; the maintenance
+loop paid a SELECT-then-UPDATE round trip per bot (29 bots) and the log
+writer committed once per row. All of these grow linearly with the journal.
 
-1. **Framework-called functions are not dead code.** A decorated top-level def
-   (FastAPI route, websocket handler, middleware) is registered with the
-   framework and called by it — the first run flagged 14 live endpoints.
-2. **A shared file preamble is not copy-paste.** Module docstrings and import
-   blocks are stripped before clone comparison, so `binance.py`/`sim.py` header
-   similarity no longer reads as duplication.
-3. **A copy-pasted function usually only renames itself.** Declaration lines are
-   dropped from block fingerprints, so a duplicated body is still detected after
-   the rename. The detector was validated by injecting a synthetic renamed clone
-   (reported) and then removing it.
+**Fix:** aggregates moved into SQL (`SUM/CASE`, `GROUP BY symbol`,
+best/worst via `ORDER BY … LIMIT 1` — NULL-safe with `COALESCE` so legacy
+rows behave exactly like the Python code they replace), `upsert_bot_stats`
+is a single `INSERT … ON CONFLICT DO UPDATE`, and the engine's log writer now
+batches with one transaction (`DB.add_logs`). The Python fallback helper
+`fnum_net` and the now-unused `all_closed_for_stats` row dump were removed
+(the audit's no-dead-code rule), replaced by `closed_totals()` and
+`symbol_stats_rows()`.
 
-## 6. Engine check (live, simulator transport, 150 symbols)
+| Path (5 k closed trades) | Before | After |
+|---|---|---|
+| `stats_summary` (every 5 s + `/api/stats`) | 22.9 ms | **5.7 ms** |
+| reconcile totals (every 30 s) | 14.2 ms | **1.1 ms** |
+| symbol stats (confidence model) | — (same 14.2 ms full scan) | **3.0 ms** |
+| 40-row log batch (log writer) | 9.0 ms | **0.2 ms** |
+| 29 × `upsert_bot_stats` (maintenance) | 14.2 ms | **1.5 ms** |
+
+Crucially the SQL aggregates stay flat as the journal grows to 50 k+ trades,
+where the old Python scans would have passed 200 ms.
+
+### 2.4 Frontend bundle — one 1.46 MB chunk
+
+**Symptom:** the whole dashboard (React + three.js + drei + framer-motion +
+app code) shipped as a single 1,460 kB JS file — one cache entry, one
+serial download, invalidated on every app change.
+
+**Fix:** vendor chunk splitting in `vite.config.ts` (three / react / motion /
+vendor / app). Same total bytes, but downloaded in parallel and cached
+independently — an app-code deploy no longer re-downloads three.js.
 
 ```
-connected: True · transport: sim · universe: 150 · API weight 0.0 % of 2 400/min (cap 2 280)
-sos: {active: false, level: "notice", reasons: ["no Binance API keys stored — simulator active"]}
+three   750.5 kB (gzip 198.8)   vendor 260.3 kB (gzip  78.8)
+react   147.3 kB (gzip  47.5)   motion 114.4 kB (gzip  37.8)
+app     189.9 kB (gzip  51.7)
 ```
 
-* **Scan stage** — 5 scanner bots × 30 assets; sweeps complete in 3.3–4.5 s.
-  The sweep is now bounded by `SCAN_TIMEOUT_S` (120 s) via `asyncio.wait_for`:
-  a hung exchange call logs and continues with the opportunities already found
-  instead of stalling the 5-minute cycle. No timeouts across 24+ logged cycles.
-* **Positions & protection** — 5/10 open, every invariant holds:
+### 2.5 Verified fast (no action needed)
 
-  | # | symbol | side | entry | stop | target | liquidation | mode |
-  |---|---|---|---|---|---|---|---|
-  | 47 | LTCUSDT | LONG | 96.7461 | 96.054 | 98.099 | 87.5457 | indicator_default |
-  | 53 | MANTAUSDT | LONG | 2.13876 | 2.104 | 2.207 | 1.93541 | indicator_default |
-  | 55 | OMNIUSDT | SHORT | 8.47608 | 8.620 | 8.190 | 9.28185 | indicator_default |
-  | 58 | WIFUSDT | SHORT | 1.36382 | 1.379 | 1.333 | 1.49348 | indicator_default |
-  | 59 | BANANAUSDT | SHORT | 45.1723 | 45.950 | 43.627 | 49.4672 | indicator_default |
+Every REST endpoint answers in ≤ 10 ms on the live engine (`/api/status`
+1.7 ms, `/api/equity` 1.3 ms, `/api/scan` 1.5 ms, `/api/logs` 2.3 ms,
+`/api/reconcile` 1.8 ms, the indicator self-test 10.6 ms); the websocket
+fan-out, event bus and rate governor are bounded queues/deques with no
+per-tick allocations; the 3D scene memoises and disposes its GPU resources.
 
-  The stop is always between entry and liquidation (`liq < SL < entry` for
-  longs, mirrored for shorts) — the "SL never beyond liquidation" rule holds on
-  every live position.
-* **Order book** — exactly one `STOP_MARKET` **and** one `TAKE_PROFIT_MARKET`
-  per open position (one risk system, its two legs), each price matching the
-  journal to the last decimal; zero orphans, zero extra orders, no duplicates.
-* **ROI trail** — 5 trades closed by the trail, every one of them profitable,
-  with `trail_stop == exit price` (+77.97 LRCUSDT, +193.63 HOTUSDT, +121.32
-  AEVOUSDT, +187.05 PIXELUSDT). The trail moves the single existing stop; it
-  never adds an order and never loosens.
-* **Accounting** — 54 closed trades, 24 W / 30 L (win rate 44.4 %), profit
-  factor 1.072, **net +$282.10 after $426.31 fees and +$7.73 net funding**,
-  0 unreconciled trades. Close reasons: 30 stop, 19 target, 5 trail.
-* **Equity manager** — starting balance locked at 10 000 (never moves after the
-  first connect), equity 10 584.40, balance 10 263.33, available 6 388.70,
-  margin used 4 195.70, released P&L +282.10.
-* **Office** — 29 agents over 7 departments, promotion rule every 20 completed
-  trades, average level 1.72, 0 retired, 0 hires yet.
-* **Indicator port** — self-test ok on 900 bars: 890 rail bars, 2 confirmed
-  flips out of 7 raw flips (higher-timeframe gate + quality filter), last trend
-  −1, clean ratio 0.517, ATR 0.627, parameters exactly the TradingView defaults
-  (swingBars 5, railSpread 1.6, railDrive 95, ghostBlur 10, slAtrX 1.5, tpAtrX 3.0).
-* **API governor** — 0.0 % of the 2 400/min budget used, hard cap at 95 %
-  (2 280) armed, no blocked requests, no halt.
+## 3. Verification
 
-Live dashboard re-check after the frontend cleanup: headquarters renders with
-minimal labels (department names and agent names only), sidebar symbols only,
-no win/loss banner, no ambient amber warning — captured to
-`/tmp/shot/post_audit_deck.png`.
+* `scripts/audit.py --strict` → **0 findings** (dead code / orphans / duplication / markers)
+* `pyflakes backend/app backend/tests` → clean
+* `pytest backend/tests -q` → **114 passed, 0 warnings** (no warning filters left)
+* indicator parity harness → **96/96 bitwise-identical** vs the pre-change implementation
+* `npx tsc --noEmit` → clean; `npm run build` → 5 chunks, no warnings
+* `npm audit` → **0 vulnerabilities**
+* `npm run ui:check` → all UI rules pass against the rendered Command Deck
+* `npm run hq:audit` → floor plan matches the live roster
+* `node scripts/ssr-smoke.mjs` → all 9 pages render against captured live fixtures
+* live engine: cycles 0.94–1.22 s, warm page load 10–14 ms, ws hello 33 ms

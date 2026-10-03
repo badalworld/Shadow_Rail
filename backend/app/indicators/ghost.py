@@ -192,7 +192,17 @@ def _htf_bull_map(candles: Sequence[Candle], base_tf: str, htf: str,
 # ──────────────────────────────────────────────────────────────────────── #
 def compute(candles: Sequence[Candle], params: GhostParams | None = None,
             base_tf: str = "5m") -> GhostSeries:
-    """Run the full GCSR pipeline over a closed-candle series."""
+    """Run the full GCSR pipeline over a closed-candle series.
+
+    Performance note: this runs for every symbol on every closed bar, and the
+    sequential stages (the smoothed-candle recursion, the rail state machine)
+    are inherently loop-shaped.  Those loops therefore run on plain Python
+    floats — numpy scalar indexing is an order of magnitude slower per
+    iteration — and the vector-friendly stages stay vectorised.  The maths is
+    unchanged: every expression is evaluated in the same order on the same
+    IEEE-754 doubles, so outputs are bit-for-bit identical to the pure-numpy
+    formulation (verified by `tests/test_indicator.py` and the parity harness).
+    """
     p = params or GhostParams()
     n = len(candles)
     o = np.array([c.o for c in candles], dtype=float)
@@ -207,138 +217,153 @@ def compute(candles: Sequence[Candle], params: GhostParams | None = None,
     drive = min(99.0, max(0.0, float(p.railDrive)))
     blur = max(1, int(p.ghostBlur))
     ease = max(1, int(p.ghostEase))
+    isnan = math.isnan
+    nan = math.nan
 
     # ── smoothed candle engine ─────────────────────────────────────────
     sd_close = (o + h + l + cl) / 4.0
-    sd_open = np.full(n, np.nan)
-    for i in range(n):
-        if i == 0:
-            sd_open[i] = (o[i] + cl[i]) / 2.0
-        else:
-            sd_open[i] = (sd_open[i - 1] + sd_close[i - 1]) / 2.0
-    sd_high = np.maximum(h, np.maximum(sd_open, sd_close))
-    sd_low = np.minimum(l, np.minimum(sd_open, sd_close))
-    sd_span = np.full(n, np.nan)
-    for i in range(n):
-        if i == 0:
-            sd_span[i] = sd_high[i] - sd_low[i]
-        else:
-            sd_span[i] = max(sd_high[i] - sd_low[i],
-                             max(abs(sd_high[i] - sd_close[i - 1]),
-                                 abs(sd_low[i] - sd_close[i - 1])))
+    ol, cll, vl = o.tolist(), cl.tolist(), v.tolist()
+    sdc = sd_close.tolist()
+    sd_open = [nan] * n
+    if n:
+        sd_open[0] = (ol[0] + cll[0]) / 2.0
+        for i in range(1, n):
+            sd_open[i] = (sd_open[i - 1] + sdc[i - 1]) / 2.0
+    sd_open_a = np.asarray(sd_open)
+    sd_high = np.maximum(h, np.maximum(sd_open_a, sd_close))
+    sd_low = np.minimum(l, np.minimum(sd_open_a, sd_close))
+    sdh, sdl = sd_high.tolist(), sd_low.tolist()
+    sd_span = [nan] * n
+    if n:
+        sd_span[0] = sdh[0] - sdl[0]
+        for i in range(1, n):
+            pc = sdc[i - 1]
+            sd_span[i] = max(sdh[i] - sdl[i],
+                             max(abs(sdh[i] - pc),
+                                 abs(sdl[i] - pc)))
+    sd_span_a = np.asarray(sd_span)
 
     # ── adaptive measures ──────────────────────────────────────────────
-    mean_span = P.sma(sd_span, swing)
-    dir_move = np.full(n, np.nan)
+    mean_span = P.sma(sd_span_a, swing)
+    msp = mean_span.tolist()
     wander = P.rolling_sum(np.abs(P.change(sd_close)), QUAL_BARS)
+    wand = wander.tolist()
+    dir_move = [nan] * n
     for i in range(n):
         j = i - QUAL_BARS
         if j >= 0:
-            dir_move[i] = abs(sd_close[i] - sd_close[j])
-    clean_ratio = np.full(n, np.nan)
+            dir_move[i] = abs(sdc[i] - sdc[j])
+    clean_ratio = [nan] * n
     for i in range(n):
-        if np.isnan(dir_move[i]) or np.isnan(wander[i]):
+        dm, wd = dir_move[i], wand[i]
+        if isnan(dm) or isnan(wd):
             continue
-        clean_ratio[i] = 0.0 if wander[i] == 0 else dir_move[i] / wander[i]
+        clean_ratio[i] = 0.0 if wd == 0 else dm / wd
 
-    kick = np.full(n, np.nan)
+    kick = [nan] * n
     for i in range(1, n):
-        if np.isnan(mean_span[i]) or mean_span[i] == 0 or np.isnan(sd_close[i - 1]):
+        ms = msp[i]
+        if isnan(ms) or ms == 0 or isnan(sdc[i - 1]):
             kick[i] = 0.0
         else:
-            kick[i] = (sd_close[i] - sd_close[i - 1]) / mean_span[i]
-    live_spread = np.full(n, np.nan)
+            kick[i] = (sdc[i] - sdc[i - 1]) / ms
+    live_spread = [nan] * n
     for i in range(n):
-        if np.isnan(mean_span[i]):
+        if isnan(msp[i]):
             continue
-        k = 0.0 if np.isnan(kick[i]) else abs(kick[i])
+        k = 0.0 if isnan(kick[i]) else abs(kick[i])
         live_spread[i] = spread * (1.0 + KICK_WEIGHT * k)
 
-    raw_flow = np.full(n, np.nan)
+    raw_flow = [nan] * n
     for i in range(n):
-        span = sd_high[i] - sd_low[i]
-        raw_flow[i] = 0.0 if span == 0 else (sd_close[i] - sd_open[i]) / span * v[i]
-    flow_smooth = P.ema(raw_flow, FLOW_BARS)
+        span = sdh[i] - sdl[i]
+        raw_flow[i] = 0.0 if span == 0 else (sdc[i] - sd_open[i]) / span * vl[i]
+    flow_smooth = P.ema(np.asarray(raw_flow), FLOW_BARS)
     vol_smooth = P.ema(P.nz(v, 0.0), FLOW_BARS)
-    flow_bias = np.full(n, np.nan)
+    fsm = flow_smooth.tolist()
+    vsm = vol_smooth.tolist()
+    flow_bias = [nan] * n
     for i in range(n):
-        if np.isnan(vol_smooth[i]) or vol_smooth[i] == 0 or np.isnan(flow_smooth[i]):
+        vs, fs = vsm[i], fsm[i]
+        if isnan(vs) or vs == 0 or isnan(fs):
             flow_bias[i] = 0.0
         else:
-            flow_bias[i] = max(-1.0, min(1.0, flow_smooth[i] / vol_smooth[i]))
+            flow_bias[i] = max(-1.0, min(1.0, fs / vs))
 
-    spread_dn = np.full(n, np.nan)
-    spread_up = np.full(n, np.nan)
-    step_damp = np.full(n, np.nan)
-    slow_damp = np.full(n, np.nan)
-    fast_damp = np.full(n, np.nan)
-    top_ref = np.full(n, np.nan)
-    bot_ref = np.full(n, np.nan)
+    spread_dn = [nan] * n
+    spread_up = [nan] * n
+    step_damp = [nan] * n
+    slow_damp = [nan] * n
+    fast_damp = [nan] * n
+    top_ref = [nan] * n
+    bot_ref = [nan] * n
     for i in range(n):
-        if np.isnan(live_spread[i]) or np.isnan(clean_ratio[i]):
+        ls, cr = live_spread[i], clean_ratio[i]
+        if isnan(ls) or isnan(cr):
             continue
-        fb = flow_bias[i] if not np.isnan(flow_bias[i]) else 0.0
-        spread_dn[i] = live_spread[i] * max(0.2, 1.0 + FLOW_WEIGHT * fb)
-        spread_up[i] = live_spread[i] * max(0.2, 1.0 - FLOW_WEIGHT * fb)
-        step_damp[i] = max(0.01, (100.0 - drive) * (1.0 - QUAL_BIAS * (2.0 * clean_ratio[i] - 1.0)))
+        fb = flow_bias[i] if not isnan(flow_bias[i]) else 0.0
+        spread_dn[i] = ls * max(0.2, 1.0 + FLOW_WEIGHT * fb)
+        spread_up[i] = ls * max(0.2, 1.0 - FLOW_WEIGHT * fb)
+        step_damp[i] = max(0.01, (100.0 - drive) * (1.0 - QUAL_BIAS * (2.0 * cr - 1.0)))
         slow_damp[i] = 0.60 * step_damp[i]
         fast_damp[i] = 0.40 * step_damp[i]
-        top_ref[i] = sd_close[i] + mean_span[i] * spread_up[i]
-        bot_ref[i] = sd_close[i] - mean_span[i] * spread_dn[i]
+        top_ref[i] = sdc[i] + msp[i] * spread_up[i]
+        bot_ref[i] = sdc[i] - msp[i] * spread_dn[i]
 
     # ── Shadow Rail state machine ──────────────────────────────────────
-    trend = np.zeros(n, dtype=int)
-    shadow_lo = np.full(n, np.nan)
-    shadow_hi = np.full(n, np.nan)
-    shadow_peak = np.nan
-    shadow_trough = np.nan
+    trend = [0] * n
+    shadow_lo = [nan] * n
+    shadow_hi = [nan] * n
+    shadow_peak = nan
+    shadow_trough = nan
     side = 0
+    sllo = nan
     for i in range(n):
         tr_i = top_ref[i]
         br_i = bot_ref[i]
-        shi = shadow_hi[i - 1] if i > 0 else np.nan
+        shi = shadow_hi[i - 1] if i > 0 else nan
         if side == 0:
-            if not (np.isnan(tr_i) or np.isnan(br_i)):
+            if not (isnan(tr_i) or isnan(br_i)):
                 side = 1
                 sllo = br_i
                 shadow_peak = br_i
         elif side == 1:
             old_peak = shadow_peak
-            shadow_peak = br_i if np.isnan(shadow_peak) else max(shadow_peak, br_i)
+            shadow_peak = br_i if isnan(shadow_peak) else max(shadow_peak, br_i)
             if shadow_peak > old_peak:
                 sllo = sllo + (shadow_peak - old_peak)
             else:
                 prev_br = bot_ref[i - 1] if i > 0 else br_i
-                prev_br = br_i if np.isnan(prev_br) else prev_br
+                prev_br = br_i if isnan(prev_br) else prev_br
                 if br_i < prev_br:
                     sllo = sllo - (prev_br - br_i) / slow_damp[i]
                 elif br_i > prev_br:
                     sllo = sllo + (br_i - prev_br) / fast_damp[i]
-            if sd_close[i] < sllo:
+            if sdc[i] < sllo:
                 side = -1
                 shi = tr_i
                 shadow_trough = tr_i
-                sllo = np.nan
+                sllo = nan
         elif side == -1:
             old_trough = shadow_trough
-            shadow_trough = tr_i if np.isnan(shadow_trough) else min(shadow_trough, tr_i)
+            shadow_trough = tr_i if isnan(shadow_trough) else min(shadow_trough, tr_i)
             if shadow_trough < old_trough:
                 shi = shi - (old_trough - shadow_trough)
             else:
                 prev_tr = top_ref[i - 1] if i > 0 else tr_i
-                prev_tr = tr_i if np.isnan(prev_tr) else prev_tr
+                prev_tr = tr_i if isnan(prev_tr) else prev_tr
                 if tr_i > prev_tr:
                     shi = shi + (tr_i - prev_tr) / slow_damp[i]
                 elif tr_i < prev_tr:
                     shi = shi - (prev_tr - tr_i) / fast_damp[i]
-            if sd_close[i] > shi:
+            if sdc[i] > shi:
                 side = 1
                 sllo = br_i
                 shadow_peak = br_i
-                shi = np.nan
+                shi = nan
         trend[i] = side
-        shadow_lo[i] = sllo if side == 1 else np.nan
-        shadow_hi[i] = shi if side == -1 else np.nan
+        shadow_lo[i] = sllo if side == 1 else nan
+        shadow_hi[i] = shi if side == -1 else nan
 
     # ── ghost candles ──────────────────────────────────────────────────
     avg_o = P.ema(o, blur)
@@ -346,35 +371,40 @@ def compute(candles: Sequence[Candle], params: GhostParams | None = None,
     avg_h = P.ema(h, blur)
     avg_l = P.ema(l, blur)
     ph_close = (avg_o + avg_h + avg_l + avg_c) / 4.0
-    ph_open = np.full(n, np.nan)
+    phc = ph_close.tolist()
+    avo, avc = avg_o.tolist(), avg_c.tolist()
+    ph_open = [nan] * n
     for i in range(n):
-        if i == 0 or np.isnan(ph_open[i - 1]):
-            ph_open[i] = (avg_o[i] + avg_c[i]) / 2.0 if not np.isnan(avg_c[i]) else np.nan
+        if i == 0 or isnan(ph_open[i - 1]):
+            ph_open[i] = (avo[i] + avc[i]) / 2.0 if not isnan(avc[i]) else nan
         else:
-            ph_open[i] = (ph_open[i - 1] + ph_close[i - 1]) / 2.0
-    body_o = P.ema(ph_open, blur)
+            ph_open[i] = (ph_open[i - 1] + phc[i - 1]) / 2.0
+    ph_open_a = np.asarray(ph_open)
+    body_o = P.ema(ph_open_a, blur)
     body_c = P.ema(ph_close, blur)
-    offset_atr = P.rma(sd_span, OFFSET_ATR_BARS)
+    offset_atr = P.rma(sd_span_a, OFFSET_ATR_BARS)
 
-    place_raw = np.zeros(n, dtype=float)
-    for i in range(n):
-        if p.ghostPlacement == "Above":
+    place_raw = [0.0] * n
+    if p.ghostPlacement == "Above":
+        for i in range(n):
             place_raw[i] = 1.0
-        elif p.ghostPlacement == "Below":
+    elif p.ghostPlacement == "Below":
+        for i in range(n):
             place_raw[i] = -1.0
-        else:
+    else:
+        for i in range(n):
             place_raw[i] = -1.0 if trend[i] == 1 else (1.0 if trend[i] == -1 else 0.0)
-    place_eased = P.ema(place_raw, ease) if ease > 1 else place_raw
+    place_eased = P.ema(np.asarray(place_raw), ease) if ease > 1 else np.asarray(place_raw)
     offset_amt = P.nz(place_eased, 0.0) * float(p.ghostOffset) * P.nz(offset_atr, 0.0)
     ghost_o = body_o + offset_amt
     ghost_c = body_c + offset_amt
     ghost_top = np.maximum(ghost_o, ghost_c)
     ghost_bot = np.minimum(ghost_o, ghost_c)
-    glow_half = P.rma(sd_span, GLOW_BARS) / 3.0
+    glow_half = P.rma(sd_span_a, GLOW_BARS) / 3.0
 
     # ── flips + filters ────────────────────────────────────────────────
-    raw_up = np.zeros(n, dtype=bool)
-    raw_dn = np.zeros(n, dtype=bool)
+    raw_up = [False] * n
+    raw_dn = [False] * n
     for i in range(1, n):
         raw_up[i] = trend[i] == 1 and trend[i - 1] == -1
         raw_dn[i] = trend[i] == -1 and trend[i - 1] == 1
@@ -389,50 +419,60 @@ def compute(candles: Sequence[Candle], params: GhostParams | None = None,
         htf_bull = np.ones(n, dtype=float)
         htf_ready = np.ones(n, dtype=bool)
 
-    turn_up = np.zeros(n, dtype=bool)
-    turn_dn = np.zeros(n, dtype=bool)
-    strong_up = np.zeros(n, dtype=bool)
-    strong_dn = np.zeros(n, dtype=bool)
-    entry_lvl = np.full(n, np.nan)
-    stop_lvl = np.full(n, np.nan)
-    target_lvl = np.full(n, np.nan)
+    turn_up = [False] * n
+    turn_dn = [False] * n
+    strong_up = [False] * n
+    strong_dn = [False] * n
+    entry_lvl = [nan] * n
+    stop_lvl = [nan] * n
+    target_lvl = [nan] * n
     atr14 = P.atr(h, l, cl, RISK_ATR_BARS)
-
+    a14 = atr14.tolist()
+    sl_x, tp_x = p.slAtrX, p.tpAtrX
+    min_trend_pct = p.minTrendPct
     for i in range(n):
         cr = clean_ratio[i]
-        pct_ok = (not np.isnan(cr)) and (cr * 100.0 >= p.minTrendPct)
+        pct_ok = (not isnan(cr)) and (cr * 100.0 >= min_trend_pct)
         up = bool(raw_up[i] and (not p.mtfGate or htf_bull[i] == 1.0) and pct_ok)
         dn = bool(raw_dn[i] and (not p.mtfGate or htf_bull[i] == 0.0) and pct_ok)
         if p.require_strong_flip:
-            up = up and (not np.isnan(cr)) and cr >= TIER_HIGH
-            dn = dn and (not np.isnan(cr)) and cr >= TIER_HIGH
+            up = up and (not isnan(cr)) and cr >= TIER_HIGH
+            dn = dn and (not isnan(cr)) and cr >= TIER_HIGH
         turn_up[i], turn_dn[i] = up, dn
-        strong_up[i] = up and (not np.isnan(cr)) and cr >= TIER_HIGH
-        strong_dn[i] = dn and (not np.isnan(cr)) and cr >= TIER_HIGH
+        strong_up[i] = up and (not isnan(cr)) and cr >= TIER_HIGH
+        strong_dn[i] = dn and (not isnan(cr)) and cr >= TIER_HIGH
         if (raw_up[i] or raw_dn[i]):
-            entry_lvl[i] = np.nan
-            stop_lvl[i] = np.nan
-            target_lvl[i] = np.nan
+            entry_lvl[i] = nan
+            stop_lvl[i] = nan
+            target_lvl[i] = nan
         if up:
-            entry_lvl[i] = cl[i]
-            stop_lvl[i] = cl[i] - p.slAtrX * atr14[i]
-            target_lvl[i] = cl[i] + p.tpAtrX * atr14[i]
+            c = cll[i]
+            entry_lvl[i] = c
+            stop_lvl[i] = c - sl_x * a14[i]
+            target_lvl[i] = c + tp_x * a14[i]
         if dn:
-            entry_lvl[i] = cl[i]
-            stop_lvl[i] = cl[i] + p.slAtrX * atr14[i]
-            target_lvl[i] = cl[i] - p.tpAtrX * atr14[i]
+            c = cll[i]
+            entry_lvl[i] = c
+            stop_lvl[i] = c + sl_x * a14[i]
+            target_lvl[i] = c - tp_x * a14[i]
 
     warmup = max(int(p.mtfEmaBars), GLOW_BARS, 4 * QUAL_BARS, swing * 2, blur * 3)
 
     return GhostSeries(
-        times=times, open=o, high=h, low=l, close=cl, volume=v, trend=trend,
-        sd_close=sd_close, sd_span=sd_span, mean_span=mean_span, clean_ratio=clean_ratio,
-        flow_bias=flow_bias, top_ref=top_ref, bot_ref=bot_ref, shadow_lo=shadow_lo, shadow_hi=shadow_hi,
+        times=times, open=o, high=h, low=l, close=cl, volume=v,
+        trend=np.asarray(trend, dtype=int),
+        sd_close=sd_close, sd_span=sd_span_a, mean_span=mean_span,
+        clean_ratio=np.asarray(clean_ratio),
+        flow_bias=np.asarray(flow_bias),
+        top_ref=np.asarray(top_ref), bot_ref=np.asarray(bot_ref),
+        shadow_lo=np.asarray(shadow_lo), shadow_hi=np.asarray(shadow_hi),
         ghost_open=ghost_o, ghost_close=ghost_c, ghost_top=ghost_top, ghost_bot=ghost_bot,
         glow_half=glow_half, atr14=atr14, htf_bull=htf_bull, htf_ready=htf_ready,
-        raw_turn_up=raw_up, raw_turn_dn=raw_dn, turn_up=turn_up, turn_dn=turn_dn,
-        strong_up=strong_up, strong_dn=strong_dn,
-        entry_lvl=entry_lvl, stop_lvl=stop_lvl, target_lvl=target_lvl,
+        raw_turn_up=np.asarray(raw_up, dtype=bool), raw_turn_dn=np.asarray(raw_dn, dtype=bool),
+        turn_up=np.asarray(turn_up, dtype=bool), turn_dn=np.asarray(turn_dn, dtype=bool),
+        strong_up=np.asarray(strong_up, dtype=bool), strong_dn=np.asarray(strong_dn, dtype=bool),
+        entry_lvl=np.asarray(entry_lvl), stop_lvl=np.asarray(stop_lvl),
+        target_lvl=np.asarray(target_lvl),
         warmup_bars=warmup, params=p,
     )
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from typing import Any, Callable, Deque, Iterable
+from typing import Any, Callable, Iterable
 
 Topic = str
 
@@ -30,7 +30,7 @@ class EventBus:
     def __init__(self, history: int = 400, queue_size: int = 800):
         self._subs: list[asyncio.Queue] = []
         self._topic_subs: dict[Topic, list[Callable[[Event], Any]]] = {}
-        self._history: Deque[Event] = deque(maxlen=history)
+        self._history: deque[Event] = deque(maxlen=history)
         self._queue_size = queue_size
         self._seq = 0
 

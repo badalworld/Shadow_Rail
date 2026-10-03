@@ -197,19 +197,17 @@ class Journal:
     async def symbol_stats(self, force: bool = False) -> dict[str, dict]:
         if not force and self._symbol_stats:
             return self._symbol_stats
-        rows = await DB.all_closed_for_stats()
         agg: dict[str, dict] = {}
-        for r in rows:
+        for r in await DB.symbol_stats_rows():
             sym = r.get("symbol") or "?"
-            a = agg.setdefault(sym, {"trades": 0, "wins": 0, "net": 0.0})
-            a["trades"] += 1
-            net = float(r.get("net_pnl") or 0.0)
-            a["net"] += net
-            if net > 0:
-                a["wins"] += 1
-        for sym, a in agg.items():
-            a["win_rate"] = (a["wins"] / a["trades"] * 100.0) if a["trades"] else 0.0
-            a["avg_net"] = a["net"] / a["trades"] if a["trades"] else 0.0
+            trades = int(r.get("trades") or 0)
+            wins = int(r.get("wins") or 0)
+            net = float(r.get("net") or 0.0)
+            agg[sym] = {
+                "trades": trades, "wins": wins, "net": net,
+                "win_rate": (wins / trades * 100.0) if trades else 0.0,
+                "avg_net": net / trades if trades else 0.0,
+            }
         self._symbol_stats = agg
         return agg
 
