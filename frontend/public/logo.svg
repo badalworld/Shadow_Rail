@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00e5a8"/>
+      <stop offset="55%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#00e5a8" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#00e5a8" stop-opacity="0.55"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3.2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#05070c"/>
+  <rect x="1.5" y="1.5" width="125" height="125" rx="27" fill="none" stroke="url(#g1)" stroke-opacity="0.45" stroke-width="1.5"/>
+  <!-- ghost candles -->
+  <g opacity="0.85" filter="url(#glow)">
+    <rect x="34" y="46" width="12" height="30" rx="3" fill="#00e5a8" opacity="0.55"/>
+    <line x1="40" y1="36" x2="40" y2="46" stroke="#00e5a8" stroke-width="2" opacity="0.6"/>
+    <line x1="40" y1="76" x2="40" y2="86" stroke="#00e5a8" stroke-width="2" opacity="0.6"/>
+    <rect x="56" y="34" width="12" height="44" rx="3" fill="#22d3ee" opacity="0.75"/>
+    <line x1="62" y1="24" x2="62" y2="34" stroke="#22d3ee" stroke-width="2"/>
+    <line x1="62" y1="78" x2="62" y2="90" stroke="#22d3ee" stroke-width="2"/>
+  </g>
+  <!-- shadow rail -->
+  <path d="M14 92 C 34 90, 48 62, 62 52 C 78 40, 96 44, 114 34"
+        fill="none" stroke="url(#g1)" stroke-width="4.5" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M14 100 C 36 98, 52 76, 66 66 C 82 54, 100 58, 116 50"
+        fill="none" stroke="#22d3ee" stroke-width="1.6" stroke-linecap="round" opacity="0.5"/>
+  <circle cx="62" cy="52" r="4.6" fill="#ffffff" filter="url(#glow)"/>
+  <path d="M20 108 H108" stroke="url(#g2)" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+</svg>

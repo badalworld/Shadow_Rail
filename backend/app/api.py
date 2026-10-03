@@ -1,0 +1,524 @@
+"""
+FastAPI application — REST + realtime websocket for the Shadow Rail dashboard.
+
+Everything the UI shows comes from here; the websocket multiplexes the event
+bus so the dashboard is genuinely live (ticks, bot states, trades, logs, SOS).
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import time
+from typing import Any
+
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from .bots import build_registry, workflow_links
+from .bus import BUS
+from .config import STORE, WEB_DIR, mask
+from .db import DB
+from .engine import TradingEngine, get_engine
+from .exchange.base import ExchangeError
+from .exchange.binance import BinanceFutures
+from .indicators import ghost
+from .journal import JOURNAL
+from .ratelimit import GOVERNOR
+from .util import now_ms, now_iso
+
+app = FastAPI(title="Shadow Rail API", version="1.0.0",
+              description="Automatic Trading Engine for Binance USDT-M Futures")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],            # dashboard may be served from the Vite dev server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+ENGINE: TradingEngine | None = None
+DEV = STORE.cfg.developer
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    global ENGINE
+    await DB.connect()
+    ENGINE = get_engine()
+    BUS.publish("system.boot", {"at": now_ms(), "version": app.version})
+    if STORE.cfg.engine.autostart:
+        asyncio.create_task(_autostart())
+
+
+async def _autostart() -> None:
+    await asyncio.sleep(1.0)
+    with contextlib.suppress(Exception):
+        await ENGINE.start()
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    if ENGINE and ENGINE.running:
+        with contextlib.suppress(Exception):
+            await ENGINE.stop()
+    await DB.close()
+
+
+def eng() -> TradingEngine:
+    if ENGINE is None:
+        raise HTTPException(503, "engine not initialised")
+    return ENGINE
+
+
+# ═══════════════════════════════════════════════════════════════ status
+@app.get("/api/status")
+async def status() -> dict:
+    e = eng()
+    return {
+        "status": e.status(),
+        "equity": e.last_equity,
+        "bots": e.registry.snapshot(GOVERNOR.snapshot()),
+        "links": workflow_links(),
+        "server_time": now_ms(),
+    }
+
+
+@app.get("/api/health")
+async def health() -> dict:
+    return {"engine": eng().health, "sos": eng().sos, "api": GOVERNOR.snapshot(),
+            "transport": eng().hub.transport, "mode": eng().hub.mode}
+
+
+@app.post("/api/health/probe")
+async def probe_now() -> dict:
+    """Force the Connector Bot to re-check the link immediately."""
+    e = eng()
+    e.registry.set_status("connector-bot", "working", "manual probe requested")
+    try:
+        h = await asyncio.wait_for(e.hub.health(deep=True), timeout=25)
+    except Exception as exc:
+        raise HTTPException(502, f"probe failed: {str(exc)[:200]}")
+    e.health = h
+    BUS.publish("connector.health", h)
+    if not h.get("connected"):
+        e._raise_sos("critical", h.get("problems") or ["probe failed"])
+    else:
+        e._clear_sos()
+    e.log("info", "connector-bot", "Manual connection probe: " +
+          ("healthy" if h.get("connected") else "; ".join(h.get("problems", []))[:160]))
+    return h
+
+
+# ══════════════════════════════════════════════════════════════ settings
+@app.get("/api/config")
+async def get_config() -> dict:
+    return {"config": STORE.public_view(), "developer": DEV.model_dump()}
+
+
+@app.put("/api/config")
+async def put_config(patch: dict = Body(...)) -> dict:
+    cfg = STORE.update(patch)
+    e = eng()
+    # hot-apply the pieces that can change at runtime
+    e.risk = type(e.risk)(cfg.risk)
+    e.registry = build_registry(cfg)
+    e.registry.publish_all(GOVERNOR.snapshot())
+    GOVERNOR.limit_per_min = cfg.engine.api_weight_limit_per_min
+    GOVERNOR.budget_pct = cfg.engine.api_budget_pct
+    GOVERNOR.allow_critical_above_cap = cfg.engine.allow_critical_above_cap
+    e.log("info", "ceo-bot", "Settings updated from the dashboard",
+          {"sections": list(patch.keys())})
+    BUS.publish("config.updated", {"sections": list(patch.keys())})
+    return {"config": STORE.public_view(), "applied": True}
+
+
+@app.post("/api/config/test-connection")
+async def test_connection(payload: dict = Body(default={})) -> dict:
+    """
+    Validate API credentials (or the pending ones) without saving them.
+    Returns balance, permissions, latency and precise error messages.
+    """
+    key = (payload.get("api_key") or "").strip() or STORE.api_key()
+    secret = (payload.get("api_secret") or "").strip() or STORE.api_secret()
+    testnet = bool(payload.get("testnet", STORE.cfg.binance.testnet))
+    if not key or not secret:
+        return {"ok": False, "error": "API key and secret are required"}
+    client = BinanceFutures(key, secret, testnet=testnet, bot_id="connector-bot")
+    out: dict[str, Any] = {"ok": False, "testnet": testnet}
+    try:
+        await client.start()
+        out["latency_ms"] = round(await client.ping(), 1)
+        out["server_time"] = await client.server_time()
+        acct = await client.account()
+        out["ok"] = True
+        out["equity"] = acct.total_margin_balance or acct.total_wallet_balance
+        out["available"] = acct.available_balance
+        out["unrealized"] = acct.total_unrealized_pnl
+        out["open_positions"] = acct.open_count
+        out["weight_header"] = client.last_weight_header
+        out["message"] = "Connection verified — Connector Bot link is green"
+    except ExchangeError as exc:
+        out["error"] = str(exc)
+        out["code"] = exc.code
+        out["hint"] = _hint_for_error(exc)
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {str(exc)[:220]}"
+        out["hint"] = ("This host cannot reach fapi.binance.com. Check the server's "
+                       "outbound network, or run the engine where Binance is reachable.")
+    finally:
+        with contextlib.suppress(Exception):
+            await client.close()
+    return out
+
+
+def _hint_for_error(exc: ExchangeError) -> str:
+    code = exc.code
+    hints = {
+        -2015: "Invalid API key, IP restriction or missing Futures permission. "
+               "Create the key with 'Enable Futures' and whitelist the server IP "
+               "shown on this page.",
+        -1022: "Signature error — the secret key is wrong or has trailing spaces.",
+        -1021: "Timestamp outside recvWindow — check the server clock (NTP).",
+        -1003: "API weight ceiling reached on Binance's side — slow the engine down.",
+        -4046: "Margin type could not be changed (no need to change) — harmless.",
+        -2019: "Margin is insufficient for this order.",
+        -4164: "Order notional below the exchange minimum (5 USDT).",
+    }
+    return hints.get(code or 0, "")
+
+
+@app.post("/api/config/verify-ip")
+async def verify_ip(payload: dict = Body(default={})) -> dict:
+    """
+    Confirm the engine's public IP so the operator can whitelist it on Binance.
+    Verifies the account is reachable *with* the whitelist in place.
+    """
+    out = {"ip": await public_ip(), "whitelisted_ok": False}
+    key = (payload.get("api_key") or "").strip() or STORE.api_key()
+    secret = (payload.get("api_secret") or "").strip() or STORE.api_secret()
+    if key and secret:
+        client = BinanceFutures(key, secret, testnet=STORE.cfg.binance.testnet,
+                                bot_id="connector-bot")
+        try:
+            await client.start()
+            await client.account()
+            out["whitelisted_ok"] = True
+            STORE.update({"binance": {"ip_whitelist_confirmed": True}})
+            out["message"] = "This IP is accepted by Binance — whitelist confirmed"
+        except ExchangeError as exc:
+            out["message"] = str(exc)
+            out["hint"] = _hint_for_error(exc)
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+    return out
+
+
+@app.get("/api/ip")
+async def ip_info() -> dict:
+    import socket
+    ip = await public_ip()
+    host = ""
+    with contextlib.suppress(Exception):
+        host = socket.gethostname()
+    return {
+        "public_ip": ip,
+        "hostname": host,
+        "whitelist_confirmed": STORE.cfg.binance.ip_whitelist_confirmed,
+        "instructions": [
+            "Binance → API Management → your key → Edit restrictions",
+            "Tick 'Restrict access to trusted IPs only' and paste the IP above",
+            f"Region must match the endpoint the engine uses "
+            f"({'testnet' if STORE.cfg.binance.testnet else 'live'}: fapi.binance.com)",
+            "Enable 'Futures' (USDⓈ-M) permission on the key",
+        ],
+    }
+
+
+async def public_ip() -> str:
+    import httpx
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip", "https://ipinfo.io/ip"):
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as c:
+                r = await c.get(url)
+                if r.status_code == 200 and r.text.strip():
+                    return r.text.strip()[:64]
+        except Exception:
+            continue
+    return "unknown (no outbound network on this host)"
+
+
+# ════════════════════════════════════════════════════════════════ equity
+@app.get("/api/equity")
+async def equity() -> dict:
+    e = eng()
+    state = e.last_equity or {**JOURNAL.state.as_dict(),
+                              "margin_budget": round(JOURNAL.margin_budget(), 2)}
+    stats = await JOURNAL.refresh_stats()
+    return {
+        **state,
+        "stats": stats,
+        "daily": await JOURNAL.daily_anchor(state.get("equity", 0.0)),
+        "max_trades": STORE.cfg.risk.max_concurrent_trades,
+        "open_slots": max(0, STORE.cfg.risk.max_concurrent_trades
+                          - int(state.get("open_positions", 0))),
+        "risk": e.risk.effective_exits(),
+    }
+
+
+@app.get("/api/equity/curve")
+async def equity_curve(limit: int = 1200) -> dict:
+    return {"points": await JOURNAL.equity_series(limit),
+            "cumulative": await JOURNAL.cumulative_pnl(400),
+            "by_day": await JOURNAL.pnl_by_day(30)}
+
+
+@app.get("/api/stats")
+async def stats() -> dict:
+    return {"stats": await JOURNAL.refresh_stats(force=True),
+            "by_day": await JOURNAL.pnl_by_day(30),
+            "symbols": await JOURNAL.symbol_stats(force=True),
+            "equity": JOURNAL.state.as_dict()}
+
+
+# ════════════════════════════════════════════════════════════════ trades
+@app.get("/api/trades/open")
+async def open_trades() -> dict:
+    e = eng()
+    out = []
+    positions = {}
+    with contextlib.suppress(Exception):
+        positions = {p.symbol: p for p in await e.hub.positions()}
+    for tid, t in e.open_trades.items():
+        pos = positions.get(t["symbol"])
+        mark = pos.mark_price if pos else e.hub.price(t["symbol"])
+        entry = float(t["entry_price"])
+        qty = float(t["qty"])
+        upnl = (mark - entry) * qty * (1 if t["side"] == "LONG" else -1)
+        out.append({**{k: v for k, v in t.items() if k != "notes"},
+                    "mark": mark, "unrealized": round(upnl, 4),
+                    "unrealized_pct": round((upnl / max(1e-9, float(t["margin"]))) * 100.0, 2),
+                    "liquidation_live": pos.liquidation_price if pos else t.get("liquidation_price"),
+                    "monitor_id": t.get("monitor_bot_id")})
+    return {"trades": out, "count": len(out),
+            "max": STORE.cfg.risk.max_concurrent_trades}
+
+
+@app.get("/api/trades/closed")
+async def closed_trades(limit: int = Query(100, le=1000), offset: int = 0,
+                        symbol: str | None = None, result: str | None = None,
+                        reason: str | None = None) -> dict:
+    rows = await DB.closed_trades(limit=limit, offset=offset, symbol=symbol,
+                                  result=result, reason=reason)
+    return {"trades": rows, "count": len(rows),
+            "total": await DB.count_closed(),
+            "stats": await JOURNAL.refresh_stats()}
+
+
+@app.get("/api/trades/{trade_id}")
+async def trade_detail(trade_id: int) -> dict:
+    trade = await DB.get_trade(trade_id)
+    if not trade:
+        raise HTTPException(404, "trade not found")
+    return {"trade": trade, "events": await DB.trade_events(trade_id)}
+
+
+# ═════════════════════════════════════════════════════════════════ scan
+@app.get("/api/scan")
+async def scan() -> dict:
+    e = eng()
+    snap = e.scan_snapshot
+    return {
+        "cycle": snap.get("cycle", 0),
+        "updated_at": snap.get("updated_at", 0),
+        "universe": e.hub.universe,
+        "by_bot": snap.get("by_bot", {}),
+        "opportunities": e.recent_analyst_rows[:40],
+        "seconds_to_close": round(e.hub.seconds_to_close(), 1),
+        "timeframe": STORE.cfg.engine.monitored_timeframe,
+    }
+
+
+@app.post("/api/scan/run")
+async def run_cycle(force: bool = True) -> dict:
+    return await eng().run_cycle(force=force)
+
+
+# ═════════════════════════════════════════════════════════════════ bots
+@app.get("/api/bots")
+async def bots() -> dict:
+    e = eng()
+    return {"bots": e.registry.snapshot(GOVERNOR.snapshot()),
+            "links": workflow_links(),
+            "ranks": ["Recruit", "Operative", "Specialist", "Elite", "Legend"]}
+
+
+@app.get("/api/bots/{bot_id}")
+async def bot_detail(bot_id: str) -> dict:
+    bot = eng().registry.get(bot_id)
+    if not bot:
+        raise HTTPException(404, "unknown bot")
+    rows = await DB.query_logs(limit=60, bot_id=bot_id)
+    return {"bot": bot.as_dict(GOVERNOR.snapshot()), "logs": rows,
+            "stats": next((s for s in await DB.bot_stats() if s["bot_id"] == bot_id), {})}
+
+
+@app.post("/api/bots/{bot_id}/promote")
+async def promote_bot(bot_id: str) -> dict:
+    bot = eng().registry.get(bot_id)
+    if not bot:
+        raise HTTPException(404, "unknown bot")
+    if bot.rank_index < 4:
+        bot.rank_index += 1
+        bot.promotions += 1
+        BUS.publish("bot.promoted", {"bot_id": bot_id, "name": bot.name, "to": bot.rank,
+                                     "manual": True, "at": now_ms()})
+    eng().registry.publish(bot_id, GOVERNOR.snapshot())
+    return {"bot": bot.as_dict(GOVERNOR.snapshot())}
+
+
+# ═════════════════════════════════════════════════════════════════ logs
+@app.get("/api/logs")
+async def logs(limit: int = Query(200, le=2000), offset: int = 0,
+               level: str | None = None, bot_id: str | None = None,
+               topic: str | None = None, search: str | None = None) -> dict:
+    rows = await DB.query_logs(limit=limit, offset=offset, level=level, bot_id=bot_id,
+                               topic=topic, search=search)
+    return {"logs": rows, "count": len(rows)}
+
+
+@app.get("/api/events")
+async def events(limit: int = 100, topic: str | None = None) -> dict:
+    return {"events": BUS.recent(limit=limit, topic_prefix=topic)}
+
+
+# ══════════════════════════════════════════════════════════════ engine ctl
+@app.post("/api/engine/start")
+async def engine_start() -> dict:
+    e = eng()
+    if not e.running:
+        await e.start()
+    return {"running": e.running, "transport": e.hub.transport, "mode": e.hub.mode}
+
+
+@app.post("/api/engine/stop")
+async def engine_stop() -> dict:
+    e = eng()
+    if e.running:
+        await e.stop()
+    return {"running": e.running}
+
+
+@app.post("/api/engine/pause")
+async def engine_pause(paused: bool = True) -> dict:
+    e = eng()
+    e.paused = paused
+    e.log("warn" if paused else "info", "ceo-bot",
+          f"Trading {'paused' if paused else 'resumed'} by operator")
+    e.registry.set_status("ceo-bot", "idle" if paused else "working",
+                          "paused by operator" if paused else "resumed")
+    return {"paused": e.paused}
+
+
+@app.post("/api/engine/emergency-close")
+async def emergency_close(confirm: str = Query(...)) -> dict:
+    if confirm != "FLATTEN":
+        raise HTTPException(400, "confirm=FLATTEN required")
+    return await eng().emergency_close_all("operator panic button")
+
+
+@app.post("/api/engine/reload-risk")
+async def reload_risk() -> dict:
+    e = eng()
+    e.risk = type(e.risk)(STORE.cfg.risk)
+    return {"risk": e.risk.effective_exits()}
+
+
+# ══════════════════════════════════════════════════════════ indicator test
+@app.get("/api/indicator/selftest")
+async def indicator_selftest() -> dict:
+    res = await asyncio.to_thread(ghost.selftest)
+    res["params"] = STORE.cfg.indicator.model_dump()
+    return res
+
+
+@app.get("/api/about")
+async def about() -> dict:
+    return {
+        "developer": DEV.model_dump(),
+        "project": {
+            "name": "Shadow Rail",
+            "engine": "Automatic Trading Engine — Binance USDT-M Futures",
+            "indicator": "Ghost Candle with Shadow Rail (GCSR) by ChartTrader-X",
+            "indicator_url": "https://www.tradingview.com/script/AY5Gz97v-Ghost-Candle-with-Shadow-Rail-Px/",
+            "timeframe": STORE.cfg.engine.monitored_timeframe,
+            "htf_filter": f"{STORE.cfg.indicator.mtfFrame} EMA-{STORE.cfg.indicator.mtfEmaBars}",
+            "mode": eng().hub.mode,
+            "transport": eng().hub.transport,
+            "api_budget_pct": STORE.cfg.engine.api_budget_pct,
+            "bots": len(eng().registry.all()),
+            "strategy": eng().risk.effective_exits(),
+        },
+    }
+
+
+# ════════════════════════════════════════════════════════════════ websocket
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket) -> None:
+    await ws.accept()
+    queue = BUS.subscribe()
+    e = eng()
+    try:
+        await ws.send_text(json.dumps({
+            "topic": "hello", "ts": now_ms(),
+            "data": {"bots": e.registry.snapshot(GOVERNOR.snapshot()),
+                     "status": e.status(),
+                     "equity": e.last_equity or JOURNAL.state.as_dict(),
+                     "logs": await DB.query_logs(limit=80),
+                     "links": workflow_links()}}))
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=12.0)
+                await ws.send_text(json.dumps(event.to_dict(), default=str))
+            except asyncio.TimeoutError:
+                await ws.send_text(json.dumps({"topic": "ping", "ts": now_ms(),
+                                               "data": {"api": GOVERNOR.snapshot()}}))
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    except Exception:
+        pass
+    finally:
+        BUS.unsubscribe(queue)
+
+
+# ═════════════════════════════════════════════════════════ static dashboard
+if WEB_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(WEB_DIR / "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def spa(full_path: str, request: Request):
+        if full_path.startswith("api/") or full_path == "ws":
+            raise HTTPException(404, "not found")
+        candidate = WEB_DIR / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        index = WEB_DIR / "index.html"
+        if index.exists():
+            return FileResponse(index)
+        raise HTTPException(404, "dashboard bundle not built")
+
+
+@app.get("/")
+async def root() -> Any:
+    index = WEB_DIR / "index.html"
+    if index.exists():
+        return FileResponse(index)
+    return JSONResponse({
+        "service": "Shadow Rail API",
+        "docs": "/docs",
+        "hint": "Frontend bundle not built yet — run `npm run build` in /frontend",
+    })
