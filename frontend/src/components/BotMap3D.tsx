@@ -1,0 +1,396 @@
+import React, { useMemo, useRef, useState, useEffect } from 'react'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
+import { ContactShadows, Html, OrbitControls, Sparkles } from '@react-three/drei'
+import * as THREE from 'three'
+import type { Bot, Link } from '../lib/types'
+import { statusColor } from './Glass'
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   The swarm map: every bot is a glowing node, every workflow link is a curved
+   rail. Pulses travel along the rails as the engine works, and the whole
+   constellation tints red when the Connector Bot raises SOS.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const GROUP_Y: Record<string, number> = {
+  core: 7.0,
+  scanner: 1.6,
+  analyst: -2.6,
+  execution: -6.0,
+  verify: -6.0,
+  monitor: 6.4,
+  finance: 1.6,
+}
+
+interface Node3D {
+  bot: Bot
+  pos: THREE.Vector3
+}
+
+function layout(bots: Bot[]): Record<string, Node3D> {
+  const nodes: Record<string, Node3D> = {}
+  const groups: Record<string, Bot[]> = {}
+  bots.forEach((b) => { (groups[b.group] ||= []).push(b) })
+
+  const place = (list: Bot[], y: number, xSpan: number, zOffset = 0, stagger = 0) => {
+    const n = Math.max(1, list.length)
+    list.forEach((b, i) => {
+      const t = n === 1 ? 0.5 : i / (n - 1)
+      nodes[b.bot_id] = {
+        bot: b,
+        pos: new THREE.Vector3(
+          (t - 0.5) * xSpan,
+          y + Math.sin(i * 1.7) * 0.35,
+          zOffset + (stagger ? (i % 2 === 0 ? stagger : -stagger) : 0),
+        ),
+      }
+    })
+  }
+
+  // core trio on the crown, scanners in an arc, analysts a wide row, etc.
+  const core = (groups.core || [])
+  place(core.filter((b) => b.bot_id === 'ceo-bot'), GROUP_Y.core + 2.6, 0)
+  place(core.filter((b) => b.bot_id !== 'ceo-bot'), GROUP_Y.core + 0.6, 18, -3.2)
+
+  const right = (groups.monitor || [])
+  place(right, GROUP_Y.monitor - 1.4, 17, 12, 1.5)
+
+  const scanners = groups.scanner || []
+  scanners.forEach((b, i) => {
+    const t = scanners.length === 1 ? 0.5 : i / (scanners.length - 1)
+    const x = (t - 0.5) * 30
+    nodes[b.bot_id] = {
+      bot: b,
+      pos: new THREE.Vector3(x, GROUP_Y.scanner - Math.cos((t - 0.5) * Math.PI) * 1.6, -2.5),
+    }
+  })
+
+  place(groups.analyst || [], GROUP_Y.analyst, 40)
+  place(groups.execution || [], GROUP_Y.execution, 12, -1)
+  place(groups.verify || [], GROUP_Y.verify + 2.6, 5, 5)
+  place(groups.finance || [], GROUP_Y.finance - 1.2, 18, -13.5, 1.7)
+  return nodes
+}
+
+function teamCentroid(nodes: Record<string, Node3D>, group: string): THREE.Vector3 {
+  const list = Object.values(nodes).filter((n) => n.bot.group === group)
+  if (!list.length) return new THREE.Vector3()
+  const v = new THREE.Vector3()
+  list.forEach((n) => v.add(n.pos))
+  return v.divideScalar(list.length)
+}
+
+function resolveNode(nodes: Record<string, Node3D>, id: string): THREE.Vector3 | null {
+  if (nodes[id]) return nodes[id].pos
+  if (id.endsWith('-team')) {
+    const group = id.replace('-team', '')
+    if (group === 'scanner') return teamCentroid(nodes, 'scanner')
+    return teamCentroid(nodes, group)
+  }
+  return null
+}
+
+const NodeMesh: React.FC<{
+  node: Node3D
+  danger: boolean
+  selected: boolean
+  onSelect: (id: string) => void
+  reduced: boolean
+}> = ({ node, danger, selected, onSelect, reduced }) => {
+  const ref = useRef<THREE.Group>(null)
+  const halo = useRef<THREE.Mesh>(null)
+  const { bot, pos } = node
+  const color = danger ? '#ff2d55' : statusColor(bot.status) === '#8aa0b6' ? bot.color : statusColor(bot.status)
+  const busy = bot.status === 'working'
+  const seed = bot.bot_id.length
+
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime()
+    if (ref.current) {
+      ref.current.rotation.y = seed % 6.28
+        + Math.sin(t * (busy ? 0.55 : 0.28) + seed) * 0.7
+      ref.current.rotation.z = Math.sin(t * 0.5 + seed) * 0.05
+      const bob = reduced ? 0 : Math.sin(t * 0.9 + seed) * 0.16
+      ref.current.position.set(pos.x, pos.y + bob, pos.z)
+    }
+    if (halo.current) {
+      const s = busy ? 1 + Math.sin(t * 3.2) * 0.12 : 1 + Math.sin(t * 0.9) * 0.03
+      halo.current.scale.setScalar(s)
+      halo.current.position.set(pos.x, pos.y, pos.z)
+    }
+  })
+
+  const size = bot.bot_id === 'ceo-bot' ? 1.5
+    : bot.group === 'scanner' ? 0.95
+    : bot.group === 'analyst' ? 1.05
+    : bot.group === 'monitor' ? 1.15 : 1.1
+
+  return (
+    <group>
+      <mesh ref={halo} position={pos}>
+        <sphereGeometry args={[size * 1.7, 20, 20]} />
+        <meshBasicMaterial color={color} transparent opacity={busy ? 0.13 : 0.05} />
+      </mesh>
+      <group ref={ref} position={pos} onClick={(e) => { e.stopPropagation(); onSelect(bot.bot_id) }}>
+        {/* body: faceted shell */}
+        <mesh castShadow>
+          <icosahedronGeometry args={[size, 1]} />
+          <meshStandardMaterial
+            color={color}
+            emissive={color}
+            emissiveIntensity={busy ? 1.35 : selected ? 0.9 : 0.35}
+            metalness={0.72}
+            roughness={0.24}
+            flatShading
+          />
+        </mesh>
+        {/* visor: a bright band across the front so each bot has a "face" */}
+        <mesh position={[0, size * 0.12, size * 0.86]} rotation={[0.1, 0, 0]}>
+          <boxGeometry args={[size * 1.05, size * 0.3, size * 0.12]} />
+          <meshBasicMaterial color={busy ? '#ffffff' : color} transparent opacity={busy ? 0.95 : 0.75} />
+        </mesh>
+        {/* shoulder ring */}
+        <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, -size * 0.15, 0]}>
+          <torusGeometry args={[size * 1.22, size * 0.05, 8, 40]} />
+          <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.6}
+            metalness={0.8} roughness={0.3} />
+        </mesh>
+        {/* antenna: a status lamp that blinks while the bot is working */}
+        <mesh position={[0, size * 1.32, 0]}>
+          <cylinderGeometry args={[size * 0.045, size * 0.045, size * 0.5, 8]} />
+          <meshStandardMaterial color="#8aa0b6" metalness={0.9} roughness={0.25} />
+        </mesh>
+        <mesh position={[0, size * 1.62, 0]}>
+          <sphereGeometry args={[size * 0.1, 12, 12]} />
+          <meshBasicMaterial color={busy ? '#ffffff' : color} />
+        </mesh>
+        {selected && (
+          <mesh rotation={[Math.PI / 2, 0, 0]}>
+            <torusGeometry args={[size * 1.6, 0.025, 8, 56]} />
+            <meshBasicMaterial color="#ffffff" />
+          </mesh>
+        )}
+      </group>
+      <Html position={[pos.x, pos.y - size - 0.9, pos.z]} center distanceFactor={30} zIndexRange={[10, 0]}>
+        <div
+          onClick={() => onSelect(bot.bot_id)}
+          className="cursor-pointer select-none whitespace-nowrap rounded-full px-2 py-[2px] text-center"
+          style={{
+            background: 'rgba(4,8,14,0.72)',
+            border: `1px solid ${color}66`,
+            color: 'var(--sr-text)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 13,
+            fontWeight: 700,
+            letterSpacing: '0.04em',
+            padding: '3px 9px',
+          }}
+        >
+          <span style={{ color }}>{bot.name}</span>
+          <span className="dim"> · {bot.rank}</span>
+          <span style={{ color, opacity: 0.75 }}>{' · '}{bot.status}</span>
+          {bot.mood === 'happy' && ' 🎉'}
+          {bot.mood === 'sad' && ' 💧'}
+          {bot.mood === 'excited' && ' ✨'}
+        </div>
+      </Html>
+    </group>
+  )
+}
+
+const Rail: React.FC<{ from: THREE.Vector3; to: THREE.Vector3; color: string; active: boolean }> =
+  ({ from, to, color, active }) => {
+    const mid = useMemo(() => {
+      const m = from.clone().add(to).multiplyScalar(0.5)
+      m.y += from.distanceTo(to) * 0.16 + 0.8
+      return m
+    }, [from, to])
+    const curve = useMemo(() => new THREE.QuadraticBezierCurve3(from, mid, to), [from, mid, to])
+    const geo = useMemo(() => new THREE.TubeGeometry(curve, 48, active ? 0.05 : 0.03, 8, false),
+      [curve, active])
+    return (
+      <mesh geometry={geo}>
+        <meshBasicMaterial color={color} transparent opacity={active ? 0.85 : 0.26} />
+      </mesh>
+    )
+  }
+
+const Pulse: React.FC<{ from: THREE.Vector3; to: THREE.Vector3; color: string }> = ({ from, to, color }) => {
+  const ref = useRef<THREE.Mesh>(null)
+  const t0 = useRef(0)
+  const mid = useMemo(() => {
+    const m = from.clone().add(to).multiplyScalar(0.5)
+    m.y += from.distanceTo(to) * 0.16 + 0.8
+    return m
+  }, [from, to])
+  const curve = useMemo(() => new THREE.QuadraticBezierCurve3(from, mid, to), [from, mid, to])
+  useFrame(({ clock }) => {
+    if (!ref.current) return
+    if (!t0.current) t0.current = clock.getElapsedTime()
+    const p = Math.min(1, (clock.getElapsedTime() - t0.current) / 1.15)
+    const v = curve.getPoint(p)
+    ref.current.position.copy(v)
+    const s = 0.16 * (1 - p * 0.4)
+    ref.current.scale.setScalar(s)
+    ;(ref.current.material as THREE.MeshBasicMaterial).opacity = 1 - p * 0.7
+  })
+  return (
+    <mesh ref={ref}>
+      <sphereGeometry args={[1, 12, 12]} />
+      <meshBasicMaterial color={color} transparent />
+    </mesh>
+  )
+}
+
+/**
+ * The work zone: a dark platform the swarm actually works on — no grid, no
+ * chart, just the deck, its rim light and the lanes the rails run along.
+ */
+const WorkZone: React.FC<{ danger: boolean }> = ({ danger }) => {
+  const rim = useRef<THREE.Mesh>(null)
+  const accent = danger ? '#ff2d55' : '#22d3ee'
+  useFrame(({ clock }) => {
+    if (!rim.current) return
+    const m = rim.current.material as THREE.MeshBasicMaterial
+    m.opacity = 0.16 + Math.sin(clock.getElapsedTime() * 0.8) * 0.05
+  })
+  return (
+    <group position={[0, -9.2, 0]}>
+      {/* the platform: soft radial sheen, no grid, no graph lines */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <circleGeometry args={[36, 128]} />
+        <meshStandardMaterial color="#070b13" metalness={0.55} roughness={0.55} />
+      </mesh>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.015, 0]}>
+        <ringGeometry args={[6, 35.5, 128]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.035} />
+      </mesh>
+      <mesh ref={rim} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.03, 0]}>
+        <ringGeometry args={[35.0, 35.7, 128]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.22} />
+      </mesh>
+      {/* a single raised dais under the CEO so the command post reads clearly */}
+      <mesh position={[0, 0.18, 0]}>
+        <cylinderGeometry args={[7.6, 8.2, 0.36, 64]} />
+        <meshStandardMaterial color="#0b1220" metalness={0.6} roughness={0.45} />
+      </mesh>
+      <mesh position={[0, 0.37, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[7.2, 7.6, 64]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.16} />
+      </mesh>
+    </group>
+  )
+}
+
+const Scene: React.FC<{
+  bots: Bot[]
+  links: Link[]
+  pulses: { id: number; from: string; to: string; stage: string }[]
+  danger: boolean
+  onSelect: (id: string) => void
+  autoRotate: boolean
+  reduced: boolean
+}> = ({ bots, links, pulses, danger, onSelect, autoRotate, reduced }) => {
+  const nodes = useMemo(() => layout(bots), [bots])
+  const activePairs = useMemo(() => pulses.map((p) => ({ ...p })), [pulses])
+  const { camera } = useThree()
+  useEffect(() => {
+    camera.position.set(0, 12.5, 47)
+  }, [camera])
+
+  return (
+    <>
+      <ambientLight intensity={0.62} />
+      <pointLight position={[12, 16, 12]} intensity={130} color={danger ? '#ff2d55' : '#22d3ee'} />
+      <pointLight position={[-14, -8, -10]} intensity={95} color={danger ? '#ff6b3d' : '#00e5a8'} />
+      <fog attach="fog" args={[danger ? '#14030a' : '#05070c', 30, 82]} />
+
+      {links.map((l, i) => {
+        const a = resolveNode(nodes, l.from)
+        const b = resolveNode(nodes, l.to)
+        if (!a || !b) return null
+        const active = activePairs.some((p) => p.from === l.from && p.to === l.to)
+        return <Rail key={`${l.from}-${l.to}-${i}`} from={a} to={b}
+          color={danger ? '#ff2d55' : active ? 'var(--color-cyan)' : 'var(--color-cyan)'}
+          active={active} />
+      })}
+
+      {activePairs.map((p) => {
+        const a = resolveNode(nodes, p.from)
+        const b = resolveNode(nodes, p.to)
+        if (!a || !b) return null
+        return <Pulse key={p.id} from={a.clone()} to={b.clone()}
+          color={danger ? '#ff8fa3' : '#7ef7d1'} />
+      })}
+
+      {Object.values(nodes).map((n) => (
+        <NodeMesh key={n.bot.bot_id} node={n} danger={danger} reduced={reduced}
+          selected={false} onSelect={onSelect} />
+      ))}
+
+      {/* lane markers: the work zone is organised in named bays */}
+      {Object.keys(GROUP_Y).map((g) => {
+        const c = teamCentroid(nodes, g)
+        if (!c.x && !c.z) return null
+        return (
+          <Html key={`lane-${g}`} position={[c.x, -8.7, c.z]} center zIndexRange={[5, 0]}>
+            <span style={{
+              fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.24em',
+              textTransform: 'uppercase', color: danger ? '#ff8fa3' : '#7ef7d1',
+              opacity: 0.5, whiteSpace: 'nowrap',
+            }}>{g} bay</span>
+          </Html>
+        )
+      })}
+
+      <WorkZone danger={danger} />
+
+      {/* soft contact shadows ground the swarm on the deck (realism) */}
+      <ContactShadows position={[0, -8.85, 0]} scale={80} opacity={danger ? 0.5 : 0.38}
+        blur={2.6} far={16} color="#000000" resolution={1024} frames={1} />
+
+      {/* drifting particles = activity in the work zone */}
+      <Sparkles count={reduced ? 0 : 90} scale={[66, 22, 44]} position={[0, 0, 0]}
+        size={2.4} speed={0.28} opacity={danger ? 0.5 : 0.35}
+        color={danger ? '#ff8fa3' : '#7ef7d1'} />
+      <OrbitControls enablePan enableZoom enableRotate autoRotate={autoRotate} autoRotateSpeed={0.42}
+        minDistance={18} maxDistance={110} maxPolarAngle={Math.PI * 0.88} />
+    </>
+  )
+}
+
+export const BotMap3D: React.FC<{
+  bots: Bot[]
+  links: Link[]
+  pulses: { id: number; from: string; to: string; stage: string }[]
+  danger: boolean
+  onSelect: (id: string) => void
+  className?: string
+}> = ({ bots, links, pulses, danger, onSelect, className = '' }) => {
+  const [autoRotate, setAutoRotate] = useState(true)
+  const reduced = typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  return (
+    <div className={`relative ${className}`}>
+      <Canvas dpr={[1, 1.75]} camera={{ position: [0, 12.5, 47], fov: 44 }}
+        gl={{ antialias: true, alpha: true }}>
+        <Scene bots={bots} links={links} pulses={pulses} danger={danger}
+          onSelect={onSelect} autoRotate={autoRotate} reduced={reduced} />
+      </Canvas>
+      <div className="absolute right-3 top-3 flex gap-2">
+        <button onClick={() => setAutoRotate((v) => !v)}
+          className="chip hover:opacity-90" style={{ cursor: 'pointer' }}>
+          {autoRotate ? '⟳ auto-orbit on' : '⟳ auto-orbit off'}
+        </button>
+      </div>
+      <div className="pointer-events-none absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1 text-[0.58rem] dim">
+        {['core', 'scanner', 'analyst', 'execution', 'verify', 'monitor', 'finance'].map((g) => (
+          <span key={g} className="flex items-center gap-1">
+            <span className="inline-block h-1.5 w-1.5 rounded-full"
+              style={{ background: 'var(--sr-accent)', opacity: 0.7 }} />
+            {g}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}

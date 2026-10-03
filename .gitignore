@@ -218,3 +218,38 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ══════════════════════════ Shadow Rail ══════════════════════════
+# runtime state: config with encrypted API keys, SQLite journal, model file
+data/
+backend/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.confidence_model.json
+
+# built dashboard (regenerate with: cd frontend && npm run build)
+backend/web/
+frontend/dist/
+
+# python
+.venv/
+venv/
+*.egg-info/
+
+# node
+node_modules/
+frontend/node_modules/
+
+# editor / os
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# typescript build cache
+*.tsbuildinfo
+
+# the generic python "lib/" rule above must not swallow dashboard source
+!frontend/src/lib/
+!frontend/src/lib/**
