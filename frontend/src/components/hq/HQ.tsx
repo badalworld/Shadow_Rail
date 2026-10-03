@@ -34,7 +34,10 @@ const WEBGL_OK: boolean = (() => {
   try {
     if (typeof document === 'undefined' || typeof document.createElement !== 'function') return false
     const c = document.createElement('canvas')
-    return !!(c.getContext && (c.getContext('webgl2') || c.getContext('webgl')))
+    const gl = c.getContext('webgl2') || c.getContext('webgl')
+    // hand the probe context straight back — the real canvas needs its own
+    if (gl) (gl.getExtension('WEBGL_lose_context') as { loseContext?: () => void } | null)?.loseContext?.()
+    return !!gl
   } catch {
     return false
   }
