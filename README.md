@@ -206,12 +206,16 @@ persisted, so restarts continue where they left off instead of resetting the dem
 ## The Command Deck
 
 The main page is deliberately one thing: the **3D AI Trading Bot Headquarters** — a trading floor
-you can fly around, where all 29 agents have a body, a desk and a job — and, underneath it, the six
-numbers that matter: **starting balance · current equity · opened positions · realised P&L ·
-fees paid · win rate**.  Everything else lives in the menu:
+you can fly around, where all 29 agents have a body, a desk and a job.  Nothing else is on it: no
+cards, no charts, no panels.  The six numbers (and the rest of the money) live on the **Account**
+page, and the app header carries only system state — the API-weight bar and the connection chip.
+Transient notifications (the top win/loss banner, the toasts) expire after **3 seconds**; the SOS
+banner stays up for as long as the connection is broken.  Everything lives in the menu:
 
 | Page | What is there |
 |---|---|
+| Command Deck | the 3D headquarters only — click agents, fly the floor, nothing else |
+| Account | starting balance · current equity · opened positions · realised P&L · fees paid · win rate, the equity sheet, growth, costs and the ledger check |
 | Open Positions | live trades, per-position ROI / peak ROI, the ROI trail lock, ledger check |
 | Market Scan | scanner bots × assets |
 | Closed Trades | history, P&L charts, the celebration tape of the newest closes |
@@ -251,6 +255,10 @@ workflow, and the agents in it are the bots that own that stage:
 * **Rendering quality** — *cinema / balanced / speed*, remembered per browser under
   `shadow-rail.hq.detail`; *speed* drops reflections, shadows and geometry detail for older
   laptops.  The node-graph view from earlier builds is still there as the **swarm map** toggle.
+* **Notifications are transient** — the win/loss banner and the toasts live exactly
+  `NOTIFY_MS = 3000` ms (see `frontend/src/state/store.tsx`), so the floor is never covered for
+  long.  `npm run ui:check` asserts that rule against the source, because minification would hide
+  it in the bundle.
 
 ### Renderpeople integration
 

@@ -48,6 +48,9 @@ const StoreCtx = createContext<StoreShape | null>(null)
 
 let uid = 1
 
+/** How long a popup (top banner, toast) stays on screen. */
+export const NOTIFY_MS = 3000
+
 /* ── boot payload ──────────────────────────────────────────────────────────
  * index.html ships a window.__SHADOW_RAIL_BOOT__ snapshot (the same frame the
  * websocket sends on connect) so the first paint already shows live numbers
@@ -106,7 +109,8 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const pushToast = useCallback((t: Omit<Toast, 'id'>) => {
     const toast = { ...t, id: uid++ }
     setToasts((prev) => [...prev.slice(-4), toast])
-    setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== toast.id)), 7000)
+    // notifications are transient: 3 s on screen, then out of the way
+    setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== toast.id)), NOTIFY_MS)
   }, [])
 
   const dismissToast = useCallback((id: number) => {
@@ -204,7 +208,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         case 'bot.promoted':
           setPromotions((prev) => [...prev.slice(-3), { id: uid++, name: d.name, from: d.from, to: d.to }])
           pushToast({ kind: 'success', title: `🎖 ${d.name} promoted`, body: `${d.from} → ${d.to}` })
-          setTimeout(() => setPromotions((prev) => prev.slice(1)), 6000)
+          setTimeout(() => setPromotions((prev) => prev.slice(1)), NOTIFY_MS)
           break
         case 'bot.demoted':
           pushToast({ kind: 'warn', title: `${d.name} demoted`, body: `${d.from} → ${d.to}` })
@@ -255,7 +259,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             id: uid++, win: !!d.win, symbol: d.symbol, net: d.net || 0,
             reason: d.reason || '', message: d.message || '',
           })
-          setTimeout(() => setCelebration((c) => (c && c.id === uid - 1 ? null : c)), 4200)
+          setTimeout(() => setCelebration((c) => (c && c.id === uid - 1 ? null : c)), NOTIFY_MS)
           refreshTrades()
           break
         case 'link.pulse':

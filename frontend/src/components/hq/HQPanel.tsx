@@ -17,8 +17,9 @@ export const HQPanel: React.FC<{
   onClose: () => void
   onFocus?: (key: StationKey | null) => void
   onPromote?: (id: string) => void
+  onOpenRoster?: () => void
   className?: string
-}> = ({ bot, onClose, onFocus, onPromote, className = '' }) => {
+}> = ({ bot, onClose, onFocus, onPromote, onOpenRoster, className = '' }) => {
   const [detail, setDetail] = useState<any>(null)
   const [busy, setBusy] = useState(false)
 
@@ -123,7 +124,13 @@ export const HQPanel: React.FC<{
             <Award size={11} /> {busy ? 'promoting…' : 'promote'}
           </button>
         )}
-        <a className="chip ml-auto flex items-center gap-1"
+        {onOpenRoster && (
+          <button className="chip ml-auto flex items-center gap-1" style={{ cursor: 'pointer' }}
+            onClick={onOpenRoster} title="Open the full roster">
+            roster <ExternalLink size={10} />
+          </button>
+        )}
+        <a className={`chip flex items-center gap-1 ${onOpenRoster ? '' : 'ml-auto'}`}
           href={`/api/bots/${bot.bot_id}`} target="_blank" rel="noreferrer">
           json <ExternalLink size={10} />
         </a>

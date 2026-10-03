@@ -3,20 +3,21 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Activity, AlertOctagon, BarChart3, Bot as BotIcon, Info, LayoutDashboard, ListTree,
   MoreHorizontal, Pause, Play, Power, Radar, Settings as SettingsIcon, ShieldAlert,
-  Square, Terminal, Zap, Waves,
+  Square, Terminal, Wallet, Zap, Waves,
 } from 'lucide-react'
 import { useStore } from '../state/store'
 import { endpoints } from '../lib/api'
-import { Chip, fmtMoney, fmtPct, statusColor } from './Glass'
+import { Chip, statusColor } from './Glass'
 import { Toasts } from './Toasts'
 import { CelebrationOverlay } from './Celebration'
 
-export type PageKey = 'dashboard' | 'positions' | 'scan' | 'trades' | 'bots' | 'logs'
+export type PageKey = 'dashboard' | 'positions' | 'account' | 'scan' | 'trades' | 'bots' | 'logs'
   | 'settings' | 'about'
 
 const NAV: { key: PageKey; label: string; icon: React.ReactNode; hint: string }[] = [
   { key: 'dashboard', label: 'Command Deck', icon: <LayoutDashboard size={19} />, hint: '3D bot work zone' },
   { key: 'positions', label: 'Open Positions', icon: <Activity size={19} />, hint: 'Live trades + trail' },
+  { key: 'account', label: 'Account', icon: <Wallet size={19} />, hint: 'Balance, equity, fees, win rate' },
   { key: 'scan', label: 'Market Scan', icon: <Radar size={19} />, hint: 'Scanner bots × assets' },
   { key: 'trades', label: 'Closed Trades', icon: <BarChart3 size={19} />, hint: 'History & P&L' },
   { key: 'bots', label: 'Bot Roster', icon: <BotIcon size={19} />, hint: '29 agents + pipeline' },
@@ -29,6 +30,7 @@ const NAV: { key: PageKey; label: string; icon: React.ReactNode; hint: string }[
 const SHORT: Record<string, string> = {
   'Command Deck': 'Deck',
   'Open Positions': 'Open',
+  'Account': 'Account',
   'Market Scan': 'Scan',
   'Closed Trades': 'Trades',
   'Bot Roster': 'Bots',
@@ -43,7 +45,7 @@ export const Layout: React.FC<{
   setPage: (p: PageKey) => void
   children: React.ReactNode
 }> = ({ page, setPage, children }) => {
-  const { status, equity, api, sos, connected, pushToast } = useStore()
+  const { status, api, sos, connected, pushToast } = useStore()
   const [busy, setBusy] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const critical = sos.active && sos.level === 'critical'
@@ -244,20 +246,8 @@ export const Layout: React.FC<{
             </span>
           </div>
 
-          <div className="mx-1 hidden h-6 w-px md:block" style={{ background: 'var(--sr-border)' }} />
-
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-            <HeaderStat label="Equity" value={fmtMoney(equity?.equity)} tone="accent" />
-            <HeaderStat label="Starting" value={fmtMoney(equity?.starting_balance)} locked />
-            <HeaderStat label="Released P&L" value={fmtMoney(equity?.released_pnl)}
-              tone={(equity?.released_pnl ?? 0) >= 0 ? 'good' : 'bad'} />
-            <HeaderStat label="Open" value={`${equity?.open_positions ?? 0}/${status?.max_trades ?? 10}`} />
-            <HeaderStat
-              label="Daily"
-              value={fmtPct(equity?.day_start_equity ? (equity.daily_pnl / equity.day_start_equity) * 100 : 0)}
-              tone={(equity?.daily_pnl ?? 0) >= 0 ? 'good' : 'bad'} />
-          </div>
-
+          {/* the header carries *system* state only — money lives on the Account
+              page now, and the page itself is whatever the menu opened */}
           <div className="ml-auto flex items-center gap-3">
             <div className="hidden items-center gap-2 lg:flex">
               <span className="text-[0.6rem] uppercase tracking-wider dim">api</span>
@@ -311,21 +301,6 @@ export const Layout: React.FC<{
 
       <Toasts />
       <CelebrationOverlay />
-    </div>
-  )
-}
-
-const HeaderStat: React.FC<{
-  label: string; value: string; tone?: 'default' | 'good' | 'bad' | 'accent'; locked?: boolean
-}> = ({ label, value, tone = 'default', locked }) => {
-  const color = tone === 'good' ? 'var(--color-bull)' : tone === 'bad' ? 'var(--color-bear)'
-    : tone === 'accent' ? 'var(--sr-accent)' : 'var(--sr-text)'
-  return (
-    <div className="leading-tight">
-      <div className="flex items-center gap-1 text-[0.58rem] uppercase tracking-[0.14em] dim">
-        {label}{locked && <span title="Locked at first connect">🔒</span>}
-      </div>
-      <div className="mono text-[0.9rem] tabular" style={{ color }}>{value}</div>
     </div>
   )
 }

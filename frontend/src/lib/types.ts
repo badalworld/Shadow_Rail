@@ -112,6 +112,7 @@ export interface EquityState {
   funding_paid: number
   funding_net: number
   daily_pnl: number
+  daily?: number
   day_start_equity: number
   peak_equity: number
   drawdown_pct: number
