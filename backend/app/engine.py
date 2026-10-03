@@ -249,10 +249,9 @@ class TradingEngine:
                         batch.append(self._log_queue.get_nowait())
                     except asyncio.QueueEmpty:
                         break
-                for r in batch:
-                    with contextlib.suppress(Exception):
-                        await DB.add_log(r["level"], r["bot_id"], r["topic"],
-                                         r["message"], r["payload"])
+                with contextlib.suppress(Exception):
+                    # one transaction for the whole batch, not one commit per row
+                    await DB.add_logs(batch)
                 if self._log_queue.qsize() == 0:
                     await asyncio.sleep(0.35)
             except asyncio.CancelledError:
@@ -1802,10 +1801,10 @@ class TradingEngine:
         than rounding, something was billed that we never booked (or vice
         versa).  Live Binance accounts expose this through the income ledger.
         """
-        closed = await DB.all_closed_for_stats()
-        journal_net = sum(float(r.get("net_pnl") or 0) for r in closed)
-        journal_fees = sum(abs(float(r.get("fee_paid") or 0)) for r in closed)
-        journal_funding = sum(float(r.get("funding_paid") or 0) for r in closed)
+        totals = await DB.closed_totals()
+        journal_net = totals["net_pnl"]
+        journal_fees = totals["fees"]
+        journal_funding = totals["funding"]
         open_fees = sum(
             float(t.get("entry_fee") or 0.0)
             or abs(float(t.get("qty") or 0)) * float(t.get("entry_price") or 0) * TAKER_FEE

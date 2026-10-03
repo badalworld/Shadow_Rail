@@ -10,6 +10,20 @@ export default defineConfig({
     outDir: '../backend/web',
     emptyOutDir: true,
     chunkSizeWarningLimit: 2000,
+    // Split the big vendors into their own cached chunks: three.js (~1 MB)
+    // and React change far less often than the app code, and parallel
+    // downloads overlap, so the first paint lands sooner.
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined
+          if (id.includes('/three/') || id.includes('/@react-three/')) return 'three'
+          if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/scheduler/')) return 'react'
+          if (id.includes('/framer-motion/') || id.includes('/motion-dom/') || id.includes('/motion-utils/')) return 'motion'
+          return 'vendor'
+        },
+      },
+    },
   },
   server: {
     host: true,

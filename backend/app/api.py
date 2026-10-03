@@ -10,6 +10,8 @@ import asyncio
 import contextlib
 import json
 import re
+import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -30,22 +32,17 @@ from .ratelimit import GOVERNOR
 from .risk import roi_points
 from .util import now_ms
 
-app = FastAPI(title="Shadow Rail API", version="1.0.0",
-              description="Automatic Trading Engine for Binance USDT-M Futures")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],            # dashboard may be served from the Vite dev server
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 ENGINE: TradingEngine | None = None
 DEV = STORE.cfg.developer
 
+# public-IP probe cache (the boot frame hits this on every page load)
+_IP_CACHE: dict[str, Any] = {"state": "", "ip": "", "at": 0.0,
+                             "fallback": "unknown (no outbound network on this host)"}
+_IP_LOCK = asyncio.Lock()
+IP_CACHE_TTL_S = 600.0
+IP_RETRY_S = 120.0
 
-@app.on_event("startup")
+
 async def _startup() -> None:
     global ENGINE
     await DB.connect()
@@ -61,12 +58,33 @@ async def _autostart() -> None:
         await ENGINE.start()
 
 
-@app.on_event("shutdown")
 async def _shutdown() -> None:
     if ENGINE and ENGINE.running:
         with contextlib.suppress(Exception):
             await ENGINE.stop()
     await DB.close()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await _startup()
+    try:
+        yield
+    finally:
+        await _shutdown()
+
+
+app = FastAPI(title="Shadow Rail API", version="1.0.0",
+              description="Automatic Trading Engine for Binance USDT-M Futures",
+              lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],            # dashboard may be served from the Vite dev server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def eng() -> TradingEngine:
@@ -251,16 +269,40 @@ async def ip_info() -> dict:
 
 
 async def public_ip() -> str:
+    """Public IP of this host, cached (IPs do not change minute to minute).
+
+    The boot frame (every dashboard load + websocket hello) needs this, so an
+    uncached call would put an external round-trip — or, on a firewalled host,
+    three 6-second timeouts — on the critical first-paint path.  A successful
+    probe is held for IP_CACHE_TTL_S; a failed one for IP_RETRY_S so a network
+    that comes back is noticed without ever stalling a page load twice.
+    """
     import httpx
-    for url in ("https://api.ipify.org", "https://ifconfig.me/ip", "https://ipinfo.io/ip"):
-        try:
-            async with httpx.AsyncClient(timeout=6.0) as c:
-                r = await c.get(url)
-                if r.status_code == 200 and r.text.strip():
-                    return r.text.strip()[:64]
-        except Exception:
-            continue
-    return "unknown (no outbound network on this host)"
+    now = time.monotonic()
+    cached = _IP_CACHE
+    if cached["state"] == "ok" and now - cached["at"] < IP_CACHE_TTL_S:
+        return cached["ip"]
+    if cached["state"] == "failed" and now - cached["at"] < IP_RETRY_S:
+        return cached["fallback"]
+    async with _IP_LOCK:                     # one probe at a time
+        now = time.monotonic()
+        if cached["state"] == "ok" and now - cached["at"] < IP_CACHE_TTL_S:
+            return cached["ip"]
+        if cached["state"] == "failed" and now - cached["at"] < IP_RETRY_S:
+            return cached["fallback"]
+        for url in ("https://api.ipify.org", "https://ifconfig.me/ip", "https://ipinfo.io/ip"):
+            try:
+                async with httpx.AsyncClient(timeout=2.5) as c:
+                    r = await c.get(url)
+                    if r.status_code == 200 and r.text.strip():
+                        cached.update(state="ok", ip=r.text.strip()[:64],
+                                      at=time.monotonic())
+                        return cached["ip"]
+            except Exception:
+                continue
+        # negative cache: remember the failure, retry at most every IP_RETRY_S
+        cached.update(state="failed", at=time.monotonic())
+        return cached["fallback"]
 
 
 # ════════════════════════════════════════════════════════════════ equity
@@ -583,14 +625,31 @@ if WEB_DIR.exists():
     # so no browser/proxy cache can ever serve yesterday's dashboard
     _ASSET_RE = re.compile(r'(/assets/[A-Za-z0-9_.\-]+\.(?:js|css|woff2?|png|jpg|svg))')
 
+    _INDEX_CACHE: dict[str, Any] = {"key": None, "html": ""}
+
+    def _read_index() -> tuple[str, str]:
+        """index.html + build stamp, re-read only when the file changes."""
+        index = WEB_DIR / "index.html"
+        try:
+            st = index.stat()
+        except OSError:                        # mid-rebuild: serve the last shell
+            return _INDEX_CACHE["html"], _INDEX_CACHE.get("stamp", "0")
+        key = (st.st_mtime_ns, st.st_size)
+        if _INDEX_CACHE["key"] != key:
+            try:
+                _INDEX_CACHE["html"] = index.read_text(encoding="utf-8")
+            except OSError:                    # vanished mid-read: keep the cache
+                return _INDEX_CACHE["html"], _INDEX_CACHE.get("stamp", "0")
+            _INDEX_CACHE["key"] = key
+            _INDEX_CACHE["stamp"] = str(int(st.st_mtime))
+        return _INDEX_CACHE["html"], _INDEX_CACHE.get("stamp", str(int(st.st_mtime)))
+
     async def render_index() -> Any:
         """Serve the SPA shell with a boot snapshot inlined so the first paint
         already shows live numbers (no flash of zeros before the socket opens)."""
-        index = WEB_DIR / "index.html"
-        if not index.exists():
+        if not (WEB_DIR / "index.html").exists():
             raise HTTPException(404, "dashboard bundle not built")
-        html = index.read_text(encoding="utf-8")
-        stamp = str(int(index.stat().st_mtime))
+        html, stamp = _read_index()
         html = _ASSET_RE.sub(lambda m: f"{m.group(1)}?v={stamp}", html)
         if "__SHADOW_RAIL_BOOT__" in html:
             return HTMLResponse(html, headers={"Cache-Control": "no-store"})

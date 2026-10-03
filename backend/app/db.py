@@ -201,6 +201,18 @@ class Database:
         await self.conn.commit()
         return cur.lastrowid or 0
 
+    async def add_logs(self, records: list[dict]) -> None:
+        """Batch insert (one transaction) — the engine's log writer flushes in
+        batches, so it must not pay a commit per row."""
+        if not records:
+            return
+        await self.conn.executemany(
+            "INSERT INTO logs(ts,level,bot_id,topic,message,payload) VALUES(?,?,?,?,?,?)",
+            [(r["ts"], r["level"], r["bot_id"], r["topic"], r["message"],
+              json.dumps(r["payload"]) if r.get("payload") else None)
+             for r in records])
+        await self.conn.commit()
+
     async def query_logs(self, limit: int = 200, offset: int = 0, level: str | None = None,
                          bot_id: str | None = None, topic: str | None = None,
                          search: str | None = None) -> list[dict]:
@@ -298,11 +310,30 @@ class Database:
         await cur.close()
         return [dict(r) for r in rows]
 
-    async def all_closed_for_stats(self) -> list[dict]:
+    async def closed_totals(self) -> dict:
+        """Net P&L / fees / funding over all closed trades (journal reconciliation).
+
+        A SQL aggregate over the closed book — the per-row Python sum this
+        replaces was O(journal size) on a path the maintenance loop runs
+        every 30 seconds.
+        """
         cur = await self.conn.execute(
-            "SELECT net_pnl, fee_paid, funding_paid, gross_pnl, closed_at, symbol, side, "
-            "close_reason, COALESCE(pnl_source,'fills') AS pnl_source FROM trades "
-            "WHERE status='closed' ORDER BY closed_at ASC")
+            "SELECT COALESCE(SUM(COALESCE(net_pnl,0)),0)   AS net_pnl, "
+            "       COALESCE(SUM(ABS(COALESCE(fee_paid,0))),0) AS fees, "
+            "       COALESCE(SUM(COALESCE(funding_paid,0)),0)  AS funding "
+            "FROM trades WHERE status='closed'")
+        row = await cur.fetchone()
+        await cur.close()
+        return {"net_pnl": float(row["net_pnl"]), "fees": float(row["fees"]),
+                "funding": float(row["funding"])}
+
+    async def symbol_stats_rows(self) -> list[dict]:
+        """Per-symbol closed-trade aggregates (scanner/analyst confidence model)."""
+        cur = await self.conn.execute(
+            "SELECT symbol, COUNT(*) AS trades, "
+            "       SUM(CASE WHEN COALESCE(net_pnl,0)>0 THEN 1 ELSE 0 END) AS wins, "
+            "       COALESCE(SUM(COALESCE(net_pnl,0)),0) AS net "
+            "FROM trades WHERE status='closed' GROUP BY symbol")
         rows = await cur.fetchall()
         await cur.close()
         return [dict(r) for r in rows]
@@ -361,20 +392,14 @@ class Database:
 
     # ------------------------------------------------------------ bot stats
     async def upsert_bot_stats(self, bot_id: str, patch: dict) -> None:
-        cur = await self.conn.execute("SELECT bot_id FROM bot_stats WHERE bot_id=?", (bot_id,))
-        exists = await cur.fetchone()
-        await cur.close()
-        if exists:
-            patch = {**patch, "updated_at": now_ms()}
-            sets = ", ".join(f"{k}=?" for k in patch)
-            await self.conn.execute(f"UPDATE bot_stats SET {sets} WHERE bot_id=?",
-                                    [*patch.values(), bot_id])
-        else:
-            data = {"bot_id": bot_id, "updated_at": now_ms(), **patch}
-            cols = ", ".join(data.keys())
-            marks = ", ".join("?" for _ in data)
-            await self.conn.execute(f"INSERT INTO bot_stats({cols}) VALUES({marks})",
-                                    list(data.values()))
+        data = {"bot_id": bot_id, "updated_at": now_ms(), **patch}
+        cols = ", ".join(data.keys())
+        updates = ", ".join(f"{k}=excluded.{k}" for k in patch)
+        marks = ", ".join("?" for _ in data)
+        await self.conn.execute(
+            f"INSERT INTO bot_stats({cols}) VALUES({marks}) "
+            f"ON CONFLICT(bot_id) DO UPDATE SET {updates}, updated_at=excluded.updated_at",
+            list(data.values()))
         await self.conn.commit()
 
     async def bot_stats(self) -> list[dict]:
@@ -384,49 +409,74 @@ class Database:
         return [dict(r) for r in rows]
 
     async def stats_summary(self) -> dict:
-        """Aggregate P&L statistics straight from the journal (source of truth)."""
-        all_rows = await self.all_closed_for_stats()
-        # Trades whose outcome the exchange never reported are counted in the
-        # totals but excluded from win/loss so the win rate stays truthful.
-        unknown = [r for r in all_rows if (r.get("pnl_source") or "fills") == "unknown"]
-        rows = [r for r in all_rows if (r.get("pnl_source") or "fills") != "unknown"]
-        wins = [r for r in rows if fnum_net(r) > 0]
-        losses = [r for r in rows if fnum_net(r) <= 0]
-        gross = sum(fnum_net(r) for r in rows)
-        fees = sum(abs(r.get("fee_paid") or 0) for r in rows)
-        funding_paid = sum((r.get("funding_paid") or 0) for r in rows)
-        win_sum = sum(fnum_net(r) for r in wins)
-        loss_sum = sum(fnum_net(r) for r in losses)
-        best = max(wins, key=fnum_net, default=None)
-        worst = min(losses, key=fnum_net, default=None)
+        """Aggregate P&L statistics straight from the journal (source of truth).
+
+        Computed as a single SQL aggregate: loading every closed trade into
+        Python scaled linearly with the journal (tens of milliseconds per call
+        on a busy quarter, on a path hit every few seconds).
+        """
+        sql = """
+        SELECT
+            COUNT(*)                                                   AS total_trades,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')='unknown' THEN 1 ELSE 0 END) AS unknown_n,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')!='unknown' THEN 1 ELSE 0 END) AS rated_n,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')!='unknown' AND COALESCE(net_pnl,0)>0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')!='unknown' AND COALESCE(net_pnl,0)<=0 THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')!='unknown' THEN COALESCE(net_pnl,0) ELSE 0 END) AS net_pnl,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')!='unknown' AND COALESCE(net_pnl,0)>0 THEN COALESCE(net_pnl,0) ELSE 0 END) AS gross_profit,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')!='unknown' AND COALESCE(net_pnl,0)<=0 THEN COALESCE(net_pnl,0) ELSE 0 END) AS gross_loss,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')!='unknown' THEN ABS(COALESCE(fee_paid,0)) ELSE 0 END) AS fees_paid,
+            SUM(CASE WHEN COALESCE(pnl_source,'fills')!='unknown' THEN COALESCE(funding_paid,0) ELSE 0 END) AS funding_paid
+        FROM trades WHERE status='closed'"""
+        cur = await self.conn.execute(sql)
+        row = await cur.fetchone()
+        await cur.close()
+        r = dict(row) if row else {}
+        # best / worst among *rated* trades only
+        cur = await self.conn.execute(
+            "SELECT net_pnl, symbol FROM trades WHERE status='closed' "
+            "AND COALESCE(pnl_source,'fills')!='unknown' "
+            "ORDER BY COALESCE(net_pnl,0) DESC LIMIT 1")
+        best = await cur.fetchone()
+        await cur.close()
+        cur = await self.conn.execute(
+            "SELECT net_pnl, symbol FROM trades WHERE status='closed' "
+            "AND COALESCE(pnl_source,'fills')!='unknown' "
+            "ORDER BY COALESCE(net_pnl,0) ASC LIMIT 1")
+        worst = await cur.fetchone()
+        await cur.close()
+
+        total = int(r.get("total_trades") or 0)
+        unknown = int(r.get("unknown_n") or 0)
+        rated = int(r.get("rated_n") or 0)
+        wins = int(r.get("wins") or 0)
+        losses = int(r.get("losses") or 0)
+        gross = float(r.get("net_pnl") or 0.0)
+        win_sum = float(r.get("gross_profit") or 0.0)
+        loss_sum = float(r.get("gross_loss") or 0.0)
+        fees = float(r.get("fees_paid") or 0.0)
+        funding_paid = float(r.get("funding_paid") or 0.0)
         return {
-            "total_trades": len(all_rows),
-            "rated_trades": len(rows),
-            "unreconciled": len(unknown),
-            "wins": len(wins),
-            "losses": len(losses),
-            "win_rate": (len(wins) / len(rows) * 100.0) if rows else 0.0,
+            "total_trades": total,
+            "rated_trades": rated,
+            "unreconciled": unknown,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": (wins / rated * 100.0) if rated else 0.0,
             "net_pnl": gross,
             "gross_profit": win_sum,
             "gross_loss": loss_sum,
             "profit_factor": (win_sum / abs(loss_sum)) if loss_sum else (999.0 if win_sum else 0.0),
-            "avg_win": (win_sum / len(wins)) if wins else 0.0,
-            "avg_loss": (loss_sum / len(losses)) if losses else 0.0,
+            "avg_win": (win_sum / wins) if wins else 0.0,
+            "avg_loss": (loss_sum / losses) if losses else 0.0,
             "fees_paid": fees,
             "funding_paid": funding_paid,        # positive = net paid, negative = received
             "funding_net": -funding_paid,        # positive = net received
-            "best_trade": fnum_net(best) if best else 0.0,
-            "best_symbol": best.get("symbol") if best else "",
-            "worst_trade": fnum_net(worst) if worst else 0.0,
-            "worst_symbol": worst.get("symbol") if worst else "",
+            "best_trade": float(best["net_pnl"] or 0.0) if best else 0.0,
+            "best_symbol": best["symbol"] if best else "",
+            "worst_trade": float(worst["net_pnl"] or 0.0) if worst else 0.0,
+            "worst_symbol": worst["symbol"] if worst else "",
         }
-
-
-def fnum_net(row: dict) -> float:
-    try:
-        return float(row.get("net_pnl") or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 DB = Database()

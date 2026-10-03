@@ -14,6 +14,8 @@ Rules honoured:
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 NaN = float("nan")
@@ -33,8 +35,8 @@ def sma(src, length: int) -> np.ndarray:
     if length <= 0 or n < length:
         return out
     valid = ~np.isnan(x)
-    csum = np.concatenate(([0.0], np.cumsum(np.where(valid, x, 0.0))))
-    ccount = np.concatenate(([0], np.cumsum(valid.astype(int))))
+    csum = np.concatenate(([0.0], np.cumsum(np.where(valid, x, 0.0)))).tolist()
+    ccount = np.concatenate(([0], np.cumsum(valid.astype(int)))).tolist()
     for i in range(length - 1, n):
         if ccount[i + 1] - ccount[i + 1 - length] == length:
             out[i] = (csum[i + 1] - csum[i + 1 - length]) / length
@@ -42,15 +44,22 @@ def sma(src, length: int) -> np.ndarray:
 
 
 def _seeded_ma(x: np.ndarray, length: int, alpha: float, seed: str = "sma") -> np.ndarray:
+    """EMA/RMA core.
+
+    The seeding + recursion loop is the indicator's hottest path (every ema /
+    rma call on every symbol on every bar), so it runs on plain Python floats:
+    identical IEEE-754 double maths at a fraction of the numpy-scalar cost.
+    """
     n = len(x)
     out = np.full(n, np.nan)
     if length <= 0 or n == 0:
         return out
-    valid = ~np.isnan(x)
+    xs = x.tolist()
+    isnan = math.isnan
     start = None
     run = 0
     for i in range(n):
-        if valid[i]:
+        if not isnan(xs[i]):
             run += 1
             if run == length:
                 start = i - length + 1
@@ -59,20 +68,22 @@ def _seeded_ma(x: np.ndarray, length: int, alpha: float, seed: str = "sma") -> n
             run = 0
     if start is None:
         return out
-    window = x[start:start + length]
     if seed == "sma":
-        prev = float(np.sum(window) / length)
+        # seeding happens once per call — keep numpy's summation order so the
+        # seed is bit-identical to the reference implementation
+        prev = float(np.sum(x[start:start + length])) / length
     else:                       # first sample
-        prev = float(window[0])
-    out[start + length - 1] = prev
+        prev = xs[start]
+    outl = out.tolist()
+    outl[start + length - 1] = prev
     for i in range(start + length, n):
-        v = x[i]
-        if np.isnan(v):
-            out[i] = np.nan              # Pine: na propagates
+        v = xs[i]
+        if isnan(v):
+            outl[i] = NaN                  # Pine: na propagates
             continue
         prev = alpha * v + (1.0 - alpha) * prev
-        out[i] = prev
-    return out
+        outl[i] = prev
+    return np.asarray(outl)
 
 
 def ema(src, length: int) -> np.ndarray:
@@ -100,8 +111,8 @@ def rolling_sum(src, length: int) -> np.ndarray:
     if length <= 0 or n < length:
         return out
     valid = ~np.isnan(x)
-    csum = np.concatenate(([0.0], np.cumsum(np.where(valid, x, 0.0))))
-    ccount = np.concatenate(([0], np.cumsum(valid.astype(int))))
+    csum = np.concatenate(([0.0], np.cumsum(np.where(valid, x, 0.0)))).tolist()
+    ccount = np.concatenate(([0], np.cumsum(valid.astype(int)))).tolist()
     for i in range(length - 1, n):
         if ccount[i + 1] - ccount[i + 1 - length] == length:
             out[i] = csum[i + 1] - csum[i + 1 - length]
@@ -131,19 +142,23 @@ def stdev(src, length: int) -> np.ndarray:
 
 
 def true_range(high, low, close) -> np.ndarray:
-    h, l, c = _as_array(high), _as_array(low), _as_array(close)
+    h, l, c = _as_array(high).tolist(), _as_array(low).tolist(), _as_array(close).tolist()
     n = len(h)
     out = np.full(n, np.nan)
     if n == 0:
         return out
     out[0] = h[0] - l[0]
+    outl = out.tolist()
+    outl[0] = h[0] - l[0]
+    isnan = math.isnan
     for i in range(1, n):
         pc = c[i - 1]
-        if np.isnan(pc):
-            out[i] = h[i] - l[i]
+        hi, lo = h[i], l[i]
+        if isnan(pc):
+            outl[i] = hi - lo
         else:
-            out[i] = max(h[i] - l[i], abs(h[i] - pc), abs(l[i] - pc))
-    return out
+            outl[i] = max(hi - lo, abs(hi - pc), abs(lo - pc))
+    return np.asarray(outl)
 
 
 def atr(high, low, close, length: int) -> np.ndarray:
