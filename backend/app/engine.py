@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .bots import REGISTRY, BotRegistry, build_registry, workflow_links
+from .bots import BotRegistry, build_registry, workflow_links
 from .bus import BUS
 from .confidence import MODEL
 from .config import ConfigStore, STORE
@@ -33,10 +33,8 @@ from .exchange.hub import MarketHub
 from .indicators import ghost
 from .journal import JOURNAL, Journal
 from .ratelimit import GOVERNOR, RateLimitHalt
-from .risk import (RiskEngine, estimate_liquidation, roi_points, roi_price_step,
-                   trail_stop_price)
-from .util import (Candle, fnum, now_iso, now_ms, percentile, round_tick,
-                   seconds_to_next_candle, tf_ms)
+from .risk import RiskEngine, roi_points, roi_price_step, trail_stop_price
+from .util import now_ms, round_tick
 
 SCAN_TIMEOUT_S = 120
 MAX_OPPORTUNITIES_PER_CYCLE = 40
@@ -725,7 +723,7 @@ class TradingEngine:
                 self.scan_snapshot["updated_at"] = now_ms()
                 self.scan_snapshot["cycle"] = self.cycle
                 self.registry.note_task(bot_id, ok=True, latency_ms=latency)
-            self.registry.set_status(bot_id, "success", f"sweep complete",
+            self.registry.set_status(bot_id, "success", "sweep complete",
                                      message=f"{found} flip(s) · {len(symbols)} assets · "
                                              f"{latency/1000:.1f}s")
             self.registry.publish(bot_id, GOVERNOR.snapshot())
@@ -735,8 +733,17 @@ class TradingEngine:
             if bot:
                 bot.mood = "happy" if found else bot.mood
 
-        await asyncio.gather(*(scan_bot(i, bucket) for i, bucket in enumerate(buckets)),
-                             return_exceptions=True)
+        # A hung exchange call must never stall the whole 5-minute cycle: the
+        # sweep is bounded and whatever the scanners already found is kept.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(scan_bot(i, bucket) for i, bucket in enumerate(buckets)),
+                               return_exceptions=True),
+                timeout=SCAN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            self.log("warn", "ceo-bot",
+                     f"scan sweep exceeded {SCAN_TIMEOUT_S}s — continuing with the "
+                     f"{len(results)} opportunit{'y' if len(results) == 1 else 'ies'} found so far")
         results.sort(key=lambda o: (o.tier == "strong", o.trend_quality), reverse=True)
         return results[:MAX_OPPORTUNITIES_PER_CYCLE]
 
@@ -877,7 +884,7 @@ class TradingEngine:
         self.risk = RiskEngine(cfg.risk)
         account = await self.hub.account()
         state = await self.journal.update(account)
-        stats = await self.journal.refresh_stats()
+        await self.journal.refresh_stats()          # keeps the dashboard stats hot
         open_count = len(self.open_trades)
 
         # hard guards before spending any API weight
@@ -1282,8 +1289,6 @@ class TradingEngine:
         roi = roi_points(entry, mark, qty, margin, side)
         # the ROI trail protects a winner: it only ever tightens the single stop
         await self._trail_tick(trade, pos, mark, bot_id)
-        sl_now = float(trade.get("sl_price") or 0)
-        sl_roi = roi_points(entry, sl_now, qty, margin, side) if sl_now else 0.0
         tp = float(trade.get("tp_price") or 0)
         sl = float(trade.get("sl_price") or 0)
         liq = pos.liquidation_price or float(trade.get("liquidation_price") or 0)

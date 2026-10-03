@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from app.db import DB
-from app.exchange.base import TAKER_FEE, Position
 from app.risk import roi_points, roi_price_step, trail_stop_price
 from tests.test_engine_flow import make_engine, make_opportunity, _set_price
 

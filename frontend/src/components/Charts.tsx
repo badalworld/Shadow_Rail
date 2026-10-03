@@ -110,30 +110,3 @@ export const Donut: React.FC<{
     </div>
   )
 }
-
-export const Sparkline: React.FC<{ values: number[]; color?: string; height?: number; width?: number }> =
-  ({ values, color = 'var(--sr-accent)', height = 26, width = 90 }) => {
-    if (!values.length) return <div style={{ width, height }} />
-    const min = Math.min(...values)
-    const max = Math.max(...values)
-    const span = max - min || 1
-    const pts = values.map((v, i) =>
-      `${(i / Math.max(1, values.length - 1)) * width},${height - ((v - min) / span) * height}`).join(' L ')
-    return (
-      <svg width={width} height={height} className="overflow-visible">
-        <path d={`M ${pts}`} fill="none" stroke={color} strokeWidth="1.6"
-          style={{ filter: `drop-shadow(0 0 4px ${color})` }} />
-      </svg>
-    )
-  }
-
-export const MiniMeter: React.FC<{ value: number; color: string; label?: string }> = ({ value, color, label }) => (
-  <div className="w-full">
-    {label && <div className="mb-1 flex justify-between text-[0.62rem] dim"><span>{label}</span>
-      <span className="mono">{value.toFixed(0)}%</span></div>}
-    <div className="h-1.5 w-full overflow-hidden rounded-full" style={{ background: 'rgba(255,255,255,0.08)' }}>
-      <div className="h-full rounded-full transition-[width] duration-700"
-        style={{ width: `${Math.min(100, Math.max(0, value))}%`, background: color, boxShadow: `0 0 8px ${color}` }} />
-    </div>
-  </div>
-)

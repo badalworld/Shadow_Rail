@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.exchange.base import Ticker
-from app.exchange.sim import MAKER_FEE, TAKER_FEE, SimExchange
+from app.exchange.sim import TAKER_FEE, SimExchange
 
 
 # ───────────────────────────── journal ─────────────────────────────
@@ -252,7 +251,7 @@ async def test_equity_bridge_reconciles_with_the_exchange(db, store):
 async def test_sim_state_round_trips_with_protective_orders():
     """Regression: export_state() referenced SimOrder fields that did not exist,
     so every persist raised and the snapshot silently froze at boot."""
-    from app.exchange.sim import SimExchange, SimOrder
+    from app.exchange.sim import SimExchange
 
     sim = SimExchange(universe=6, history_bars=120, warm_candles=40)
     await sim.market_order("BTCUSDT", "BUY", 0.01)

@@ -26,10 +26,6 @@ def _as_array(x) -> np.ndarray:
     return np.asarray(list(x), dtype=float)
 
 
-def na_mask(x: np.ndarray) -> np.ndarray:
-    return np.isnan(x)
-
-
 def sma(src, length: int) -> np.ndarray:
     x = _as_array(src)
     n = len(x)
@@ -122,16 +118,6 @@ def highest(src, length: int) -> np.ndarray:
     return out
 
 
-def lowest(src, length: int) -> np.ndarray:
-    x = _as_array(src)
-    n = len(x)
-    out = np.full(n, np.nan)
-    for i in range(length - 1, n):
-        w = x[i - length + 1:i + 1]
-        out[i] = np.nan if np.isnan(w).any() else float(np.min(w))
-    return out
-
-
 def stdev(src, length: int) -> np.ndarray:
     x = _as_array(src)
     n = len(x)
@@ -172,17 +158,6 @@ def crossover(a, b) -> np.ndarray:
         if np.isnan(x[i]) or np.isnan(y[i]) or np.isnan(x[i - 1]) or np.isnan(y[i - 1]):
             continue
         out[i] = x[i] > y[i] and x[i - 1] <= y[i - 1]
-    return out
-
-
-def crossunder(a, b) -> np.ndarray:
-    x, y = _as_array(a), _as_array(b)
-    n = len(x)
-    out = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        if np.isnan(x[i]) or np.isnan(y[i]) or np.isnan(x[i - 1]) or np.isnan(y[i - 1]):
-            continue
-        out[i] = x[i] < y[i] and x[i - 1] >= y[i - 1]
     return out
 
 

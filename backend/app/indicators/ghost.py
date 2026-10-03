@@ -296,7 +296,6 @@ def compute(candles: Sequence[Candle], params: GhostParams | None = None,
     for i in range(n):
         tr_i = top_ref[i]
         br_i = bot_ref[i]
-        slo = shadow_lo[i - 1] if i > 0 else np.nan
         shi = shadow_hi[i - 1] if i > 0 else np.nan
         if side == 0:
             if not (np.isnan(tr_i) or np.isnan(br_i)):

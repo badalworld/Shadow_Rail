@@ -10,7 +10,6 @@ import asyncio
 import contextlib
 import json
 import re
-import time
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -20,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .bots import PROMOTE_EVERY, build_registry, workflow_links
 from .bus import BUS
-from .config import STORE, WEB_DIR, mask
+from .config import STORE, WEB_DIR
 from .db import DB
 from .engine import TradingEngine, get_engine
 from .exchange.base import ExchangeError
@@ -29,7 +28,7 @@ from .indicators import ghost
 from .journal import JOURNAL
 from .ratelimit import GOVERNOR
 from .risk import roi_points
-from .util import now_ms, now_iso
+from .util import now_ms
 
 app = FastAPI(title="Shadow Rail API", version="1.0.0",
               description="Automatic Trading Engine for Binance USDT-M Futures")
@@ -545,7 +544,6 @@ async def about() -> dict:
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     queue = BUS.subscribe()
-    e = eng()
     try:
         await ws.send_text(json.dumps({
             "topic": "hello", "ts": now_ms(), "data": await boot_payload()},

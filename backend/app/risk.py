@@ -15,13 +15,12 @@ Hard rules enforced here — every one of them is unit-tested:
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
 from .config import RiskSettings
-from .exchange.base import ExchangeError, SymbolFilter
-from .util import clamp, fnum, round_step, round_tick
+from .exchange.base import SymbolFilter
+from .util import round_step, round_tick
 
 DEFAULT_MMR = 0.005          # maintenance margin ratio at 10x (bracket 1)
 
@@ -316,20 +315,7 @@ def _describe_mode(s: RiskSettings) -> str:
             f"TP {s.custom_tp_atr_mult if s.custom_tp_enabled else '—'}×ATR. "
             "Stop clamped inside liquidation.")
 
-
-def validate_notional(qty: float, price: float, flt: SymbolFilter) -> tuple[bool, str]:
-    if qty <= 0:
-        return False, "qty must be positive"
-    if qty < flt.min_qty:
-        return False, f"qty {qty} < minQty {flt.min_qty}"
-    notional = qty * price
-    if notional < flt.min_notional:
-        return False, f"notional {notional:.2f} < minNotional {flt.min_notional:.2f}"
-    return True, ""
-
-
-def apply_slippage_guard(price: float, expected: float, tolerance_pct: float = 0.6) -> bool:
-    """Reject a fill that is absurdly far from the decision price."""
-    if expected <= 0:
-        return True
-    return abs(price - expected) / expected * 100.0 <= tolerance_pct
+# NOTE: qty / min-notional validation lives inside plan_sizing() above (it owns
+# the step floor, the max-qty clamp and min_notional_override) and fill sanity
+# lives in the executor's fill-drift recompute — so there is deliberately no
+# second copy of either rule here.

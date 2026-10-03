@@ -15,12 +15,12 @@ import contextlib
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 from ..bus import BUS
 from ..config import ConfigStore, STORE
 from ..ratelimit import GOVERNOR, RateLimitHalt
-from ..util import Candle, fnum, now_ms, percentile, seconds_to_next_candle, tf_ms
+from ..util import Candle, fnum, now_ms, seconds_to_next_candle, tf_ms
 from .base import AccountSnapshot, ExchangeError, Fill, OrderResult, Position, SymbolFilter, Ticker
 from .binance import BinanceFutures
 from .sim import SimExchange

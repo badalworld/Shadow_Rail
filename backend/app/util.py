@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import math
 import time
-from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from typing import Sequence
 
 # ---------------------------------------------------------------- time ------
 TIMEFRAME_MS: dict[str, int] = {
@@ -18,13 +17,6 @@ TIMEFRAME_MIN: dict[str, int] = {k: v // 60_000 for k, v in TIMEFRAME_MS.items()
 def now_ms() -> int:
     return int(time.time() * 1000)
 
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-
-
-def iso(ts_s: float) -> str:
-    return datetime.fromtimestamp(ts_s, timezone.utc).isoformat(timespec="seconds")
 
 
 def normalize_tf(tf: str | int) -> str:
@@ -62,9 +54,6 @@ def candle_open_ms(now: int, tf: str) -> int:
     step = tf_ms(tf)
     return (now // step) * step
 
-
-def last_closed_open_ms(now: int, tf: str) -> int:
-    return candle_open_ms(now, tf) - tf_ms(tf)
 
 
 def seconds_to_next_candle(now: int, tf: str) -> float:
@@ -104,24 +93,6 @@ def round_tick(price: float, tick: float) -> float:
         return price
     precision = max(0, int(round(-math.log10(tick)))) if tick < 1 else 0
     return float(f"{round(price / tick) * tick:.{precision}f}")
-
-
-def safe_div(a: float, b: float, default: float = 0.0) -> float:
-    return default if b == 0 else a / b
-
-
-def percentile(values: Sequence[float], q: float) -> float:
-    if not values:
-        return 0.0
-    data = sorted(values)
-    if len(data) == 1:
-        return data[0]
-    pos = (len(data) - 1) * q
-    lo = math.floor(pos)
-    hi = math.ceil(pos)
-    if lo == hi:
-        return data[int(pos)]
-    return data[lo] + (data[hi] - data[lo]) * (pos - lo)
 
 
 def stdev(values: Sequence[float]) -> float:
@@ -165,39 +136,6 @@ class Candle(tuple):
         return self[5]
 
 
-def aggregate(candles: Sequence[Candle], source_tf: str, target_tf: str) -> list[Candle]:
-    """Aggregate a lower timeframe series up (e.g. 5m -> 1h), aligned on epoch."""
-    step_src = tf_ms(source_tf)
-    step_tgt = tf_ms(target_tf)
-    if step_tgt % step_src != 0:
-        raise ValueError("target timeframe must be a multiple of source")
-    factor = step_tgt // step_src
-    out: list[Candle] = []
-    bucket: list[Candle] = []
-    current = None
-    for c in candles:
-        key = c.t // step_tgt
-        if current is None:
-            current = key
-        if key != current:
-            out.append(_merge(bucket))
-            bucket = []
-            current = key
-        bucket.append(c)
-        if len(bucket) == factor:
-            out.append(_merge(bucket))
-            bucket = []
-            current = None
-    return [c for c in out if c is not None]
-
-
-def _merge(bucket: Sequence[Candle]) -> Candle | None:
-    if not bucket:
-        return None
-    return Candle(bucket[0].t, bucket[0].o,
-                  max(c.h for c in bucket), min(c.l for c in bucket),
-                  bucket[-1].c, sum(c.v for c in bucket))
-
 
 def true_range(prev_close: float | None, high: float, low: float) -> float:
     if prev_close is None:
@@ -205,11 +143,3 @@ def true_range(prev_close: float | None, high: float, low: float) -> float:
     return max(high - low, abs(high - prev_close), abs(low - prev_close))
 
 
-def fmt_money(v: float) -> str:
-    sign = "-" if v < 0 else ""
-    return f"{sign}${abs(v):,.2f}"
-
-
-def chunked(seq: Sequence, size: int) -> Iterable[Sequence]:
-    for i in range(0, len(seq), size):
-        yield seq[i:i + size]

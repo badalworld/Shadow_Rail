@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import pytest
 
-from app.db import DB
 from tests.test_engine_flow import make_engine, make_opportunity, _set_price
 
 pytestmark = pytest.mark.asyncio

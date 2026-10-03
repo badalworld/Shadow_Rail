@@ -384,31 +384,25 @@ class BinanceFutures:
                           close_position: bool = True, qty: float | None = None,
                           working_type: str = "MARK_PRICE",
                           client_id: str = "") -> OrderResult:
-        params: dict[str, Any] = {
-            "symbol": symbol, "side": side.upper(), "type": "STOP_MARKET",
-            "stopPrice": f"{stop_price:.10f}".rstrip("0").rstrip("."),
-            "workingType": working_type, "priceProtect": "true",
-        }
-        if close_position:
-            params["closePosition"] = "true"
-        elif qty:
-            params["quantity"] = f"{qty:.10f}".rstrip("0").rstrip(".")
-        if client_id:
-            params["newClientOrderId"] = client_id[:36]
-        data = await self._request("POST", "/fapi/v1/order", signed=True, op="order",
-                                   params=params, critical=True)
-        return OrderResult(order_id=str(data.get("orderId")), symbol=symbol,
-                           side=side.upper(), type="STOP_MARKET",
-                           status=data.get("status", "NEW"), qty=qty or 0.0,
-                           stop_price=stop_price, client_id=data.get("clientOrderId", ""),
-                           raw=data)
+        return await self._conditional_market("STOP_MARKET", symbol, side, stop_price,
+                                              close_position, qty, working_type, client_id)
 
     async def take_profit_market(self, symbol: str, side: str, stop_price: float,
                                  close_position: bool = True, qty: float | None = None,
                                  working_type: str = "MARK_PRICE",
                                  client_id: str = "") -> OrderResult:
+        return await self._conditional_market("TAKE_PROFIT_MARKET", symbol, side,
+                                              stop_price, close_position, qty,
+                                              working_type, client_id)
+
+    async def _conditional_market(self, order_type: str, symbol: str, side: str,
+                                  stop_price: float, close_position: bool,
+                                  qty: float | None, working_type: str,
+                                  client_id: str) -> OrderResult:
+        """STOP_MARKET / TAKE_PROFIT_MARKET share one path — only ONE protective
+        order type is ever active, so the two payloads must never drift apart."""
         params: dict[str, Any] = {
-            "symbol": symbol, "side": side.upper(), "type": "TAKE_PROFIT_MARKET",
+            "symbol": symbol, "side": side.upper(), "type": order_type,
             "stopPrice": f"{stop_price:.10f}".rstrip("0").rstrip("."),
             "workingType": working_type, "priceProtect": "true",
         }
@@ -421,7 +415,7 @@ class BinanceFutures:
         data = await self._request("POST", "/fapi/v1/order", signed=True, op="order",
                                    params=params, critical=True)
         return OrderResult(order_id=str(data.get("orderId")), symbol=symbol,
-                           side=side.upper(), type="TAKE_PROFIT_MARKET",
+                           side=side.upper(), type=order_type,
                            status=data.get("status", "NEW"), qty=qty or 0.0,
                            stop_price=stop_price, client_id=data.get("clientOrderId", ""),
                            raw=data)

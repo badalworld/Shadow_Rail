@@ -1,8 +1,6 @@
 """End-to-end workflow: scan → analyse → execute → verify → monitor → close."""
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from app.bots import build_registry
@@ -10,9 +8,7 @@ from app.bus import BUS
 from app.db import DB
 from app.engine import Opportunity, Proposal, TradingEngine
 from app.exchange.sim import SimExchange
-from app.indicators import ghost
 from app.journal import Journal
-from app.risk import RiskEngine
 
 pytestmark = pytest.mark.asyncio
 
@@ -392,7 +388,7 @@ async def test_restart_loses_nothing_from_the_paper_account(db, store):
     hub = MarketHub(store=store)
     await hub.start()
     await _set_price_engine(hub)
-    trade = await hub.market_order("BTCUSDT", "BUY", 0.01)
+    await hub.market_order("BTCUSDT", "BUY", 0.01)
     balance_before = hub.exchange.balance
 
     # what the engine does on shutdown

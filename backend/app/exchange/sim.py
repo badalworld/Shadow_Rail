@@ -15,9 +15,8 @@ Shadow Rail state machine to produce realistic flip sequences.
 from __future__ import annotations
 
 import asyncio
-import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..bus import BUS
@@ -25,7 +24,7 @@ from ..util import Candle, now_ms, tf_ms
 from .base import (TAKER_FEE, AccountSnapshot, ExchangeError, Fill, OrderResult,
                    Position, SymbolFilter, Ticker)
 
-MAKER_FEE = 0.0002
+# the simulator fills as a taker (see _apply_fill), so only TAKER_FEE applies
 FUNDING_INTERVAL_MS = 8 * 3600 * 1000
 
 
@@ -196,7 +195,7 @@ class SimExchange:
                 min_qty=step, min_notional=5.0, max_qty=max_qty, max_leverage=125,
                 quote="USDT", contract_type="PERPETUAL", status="TRADING")
 
-    def _advance(self, s: "SymbolState", prev_close: float) -> Candle:
+    def _advance(self, s: SimSymbol, prev_close: float) -> Candle:
         """
         One realistic bar: volatility regimes + an AR(1) momentum term.
 
@@ -422,27 +421,26 @@ class SimExchange:
     async def stop_market(self, symbol: str, side: str, stop_price: float,
                           close_position: bool = True, qty: float | None = None,
                           working_type: str = "MARK_PRICE", client_id: str = "") -> OrderResult:
-        self._order_seq += 1
-        oid = str(self._order_seq)
-        order = SimOrder(order_id=oid, symbol=symbol, side=side.upper(),
-                         type="STOP_MARKET", qty=qty or 0.0, stop_price=stop_price,
-                         close_position=close_position)
-        self.orders[oid] = order
-        return OrderResult(order_id=oid, symbol=symbol, side=side.upper(),
-                           type="STOP_MARKET", status="NEW", qty=qty or 0.0,
-                           stop_price=stop_price, client_id=client_id)
+        return self._conditional_market("STOP_MARKET", symbol, side, stop_price,
+                                        close_position, qty, client_id)
 
     async def take_profit_market(self, symbol: str, side: str, stop_price: float,
                                  close_position: bool = True, qty: float | None = None,
                                  working_type: str = "MARK_PRICE", client_id: str = "") -> OrderResult:
+        return self._conditional_market("TAKE_PROFIT_MARKET", symbol, side, stop_price,
+                                        close_position, qty, client_id)
+
+    def _conditional_market(self, order_type: str, symbol: str, side: str,
+                            stop_price: float, close_position: bool, qty: float | None,
+                            client_id: str) -> OrderResult:
+        """Mirror of the live client: both protective order types take one path."""
         self._order_seq += 1
         oid = str(self._order_seq)
-        order = SimOrder(order_id=oid, symbol=symbol, side=side.upper(),
-                         type="TAKE_PROFIT_MARKET", qty=qty or 0.0, stop_price=stop_price,
-                         close_position=close_position)
-        self.orders[oid] = order
+        self.orders[oid] = SimOrder(order_id=oid, symbol=symbol, side=side.upper(),
+                                    type=order_type, qty=qty or 0.0, stop_price=stop_price,
+                                    close_position=close_position)
         return OrderResult(order_id=oid, symbol=symbol, side=side.upper(),
-                           type="TAKE_PROFIT_MARKET", status="NEW", qty=qty or 0.0,
+                           type=order_type, status="NEW", qty=qty or 0.0,
                            stop_price=stop_price, client_id=client_id)
 
     async def cancel_all(self, symbol: str) -> None:
@@ -659,7 +657,3 @@ class SimExchange:
                                    realized_pnl=payment, ts=now_ms(), kind="FUNDING_FEE",
                                    trade_id=f"funding-{self._virtual_now}"))
         BUS.publish("sim.funding", {"at": self._virtual_now})
-
-
-# Backwards-friendly alias used by the hub
-SimBroker = SimExchange

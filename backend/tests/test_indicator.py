@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from app.indicators import ghost, pine
-from app.util import Candle, tf_ms
+from app.util import Candle
 
 
 def mk_series(prices, start_t=0, step=300_000, vol=1000.0):

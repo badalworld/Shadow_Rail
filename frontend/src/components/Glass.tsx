@@ -85,27 +85,6 @@ export const Bar: React.FC<{
   </div>
 )
 
-export const Ring: React.FC<{
-  value: number; size?: number; stroke?: number; color?: string; label?: React.ReactNode
-}> = ({ value, size = 68, stroke = 7, color = 'var(--sr-accent)', label }) => {
-  const r = (size - stroke) / 2
-  const c = 2 * Math.PI * r
-  const pct = Math.max(0, Math.min(100, value))
-  return (
-    <div className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
-      <svg width={size} height={size} className="-rotate-90">
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.09)" strokeWidth={stroke} />
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke}
-          strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c - (pct / 100) * c}
-          style={{ transition: 'stroke-dashoffset 600ms ease', filter: `drop-shadow(0 0 6px ${color})` }} />
-      </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center">
-        {label ?? <span className="mono text-[0.8rem]">{pct.toFixed(0)}%</span>}
-      </div>
-    </div>
-  )
-}
-
 export const statusColor = (status?: string): string => {
   switch (status) {
     case 'working': return 'var(--color-cyan)'
