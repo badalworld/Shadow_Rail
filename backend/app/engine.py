@@ -28,13 +28,15 @@ from .bus import BUS
 from .confidence import MODEL
 from .config import ConfigStore, STORE
 from .db import DB
-from .exchange.base import ExchangeError, Position
+from .exchange.base import TAKER_FEE, ExchangeError, Position
 from .exchange.hub import MarketHub
 from .indicators import ghost
 from .journal import JOURNAL, Journal
 from .ratelimit import GOVERNOR, RateLimitHalt
-from .risk import RiskEngine, estimate_liquidation
-from .util import Candle, fnum, now_iso, now_ms, percentile, seconds_to_next_candle, tf_ms
+from .risk import (RiskEngine, estimate_liquidation, roi_points, roi_price_step,
+                   trail_stop_price)
+from .util import (Candle, fnum, now_iso, now_ms, percentile, round_tick,
+                   seconds_to_next_candle, tf_ms)
 
 SCAN_TIMEOUT_S = 120
 MAX_OPPORTUNITIES_PER_CYCLE = 40
@@ -143,6 +145,7 @@ class TradingEngine:
         self.sos: dict[str, Any] = {"active": False, "level": "none", "reasons": [],
                                     "since": 0, "checks": 0, "last_ok": 0}
         self.health: dict[str, Any] = {"connected": False, "problems": ["not started"]}
+        self._last_connector_level: str | None = None   # green-light hand-off tracker
         self.workflow: dict[str, Any] = {"cycle": 0, "stage": "idle",
                                          "stages": {k: {"status": "idle", "detail": "",
                                                         "at": 0}
@@ -300,41 +303,76 @@ class TradingEngine:
                           "transport": self.hub.transport, "checked_at": now_ms()}
             self.health = health
             self.sos["checks"] += 1
-            problems = health.get("problems") or []
-            critical = (not health.get("connected")) and (
-                self.hub.transport == "binance" or not self.store.cfg.engine.simulate_when_offline)
-            # even in sim mode, a Binance failure in LIVE mode is an SOS for the operator
-            if self.hub.transport != "binance" and self.store.cfg.binance.mode == "live" \
-                    and self.hub.last_error:
-                problems = list(problems) + [self.hub.last_error]
-                critical = True
+            level, problems = self._connector_verdict(health)
+            waiting_for_keys = self.hub.transport != "binance" \
+                and not bool(self.store.api_key() and self.store.api_secret())
 
-            was_active = self.sos["active"]
-            if critical:
+            if level == "critical":
                 self._raise_sos("critical", problems or ["connection lost"])
                 self.registry.set_status("connector-bot", "error", "SOS RAISED",
                                          message="; ".join(problems)[:200])
-            elif problems:
+            elif level == "warning":
                 self._raise_sos("warning", problems)
-                self.registry.set_status("connector-bot", "success", "link degraded",
-                                         message="; ".join(problems)[:200])
+                if waiting_for_keys:
+                    self.registry.set_status(
+                        "connector-bot", "success", "simulator active",
+                        message="add the Binance API key + secret in Settings to go live")
+                else:
+                    self.registry.set_status("connector-bot", "success", "link degraded",
+                                             message="; ".join(problems)[:200])
             else:
                 self._clear_sos()
                 self.registry.set_status(
                     "connector-bot", "success", "link verified",
                     message=f"{health.get('transport')} OK · {health.get('latency_ms', 0):.0f} ms · "
                             f"{health.get('universe', 0)} symbols")
-                if not was_active:
-                    self._wf("connector", "done", "green signal sent to Engine CEO")
+
+            # inform the CEO on every *change* of link state (first probe counts,
+            # recovering from the siren counts) — but never while the SOS is up
+            # and never on a repeated 5-minute probe, so the log stays readable
+            prev_level = self._last_connector_level
+            self._last_connector_level = level
+            if level != "critical" and (prev_level is None or prev_level == "critical"
+                                        or (prev_level == "none" and level == "warning")):
+                self._wf("connector", "done", f"link {level} → Engine CEO informed")
+                if level == "warning" and waiting_for_keys:
+                    self.log("info", "connector-bot",
+                             "Simulation broker active — no Binance keys yet; add them in "
+                             "Settings to go live. Engine CEO informed.",
+                             {"health": {k: v for k, v in health.items() if k != "api_weight"}})
+                else:
                     self.log("success", "connector-bot",
                              f"Connection confirmed ({health.get('transport')}, "
                              f"{health.get('latency_ms', 0):.0f}ms) → green signal to CEO",
                              {"health": {k: v for k, v in health.items() if k != "api_weight"}})
-                    self.registry.set_status("ceo-bot", "working", "awaiting scan cycle",
-                                             message="green signal received from ORACLE")
+                self.registry.set_status("ceo-bot", "working", "awaiting scan cycle",
+                                         message="link report received from ORACLE")
             BUS.publish("connector.health", health)
-            self._wf("connector", "done" if not critical else "error",
+            self._wf("connector", "error" if level == "critical" else "done",
                      "; ".join(problems)[:180] if problems else "healthy")
+
+    def _connector_verdict(self, health: dict[str, Any]) -> tuple[str, list[str]]:
+        """
+        Classify a Connector-Bot probe: ``none`` (green), ``warning`` (amber) or
+        ``critical`` (the ☠️ SOS siren that turns the dashboard red).
+
+        The siren is reserved for a link that is *supposed* to be up: keys are
+        stored and/or the transport is Binance.  A brand-new install that has no
+        keys yet gets the amber prompt — there is nothing to connect to, and a
+        permanently red dashboard would hide a real outage later.
+        """
+        problems = list(health.get("problems") or [])
+        creds = bool(self.store.api_key() and self.store.api_secret())
+        # live mode with keys but the transport fell back to the simulator
+        if self.hub.transport != "binance" and self.store.cfg.binance.mode == "live" \
+                and self.hub.last_error:
+            problems = problems + [self.hub.last_error]
+            return ("critical" if creds else "warning"), problems
+        if not health.get("connected"):
+            hard = self.hub.transport == "binance" \
+                or not self.store.cfg.engine.simulate_when_offline
+            return ("critical" if hard else "warning"), (problems or ["connection lost"])
+        return ("warning", problems) if problems else ("none", problems)
 
     def _raise_sos(self, level: str, reasons: list[str]) -> None:
         if level == "warning" and self.sos["active"] and self.sos["level"] == "critical":
@@ -344,12 +382,16 @@ class TradingEngine:
             self.sos.update({"active": True, "level": level, "reasons": reasons[:6],
                              "since": self.sos["since"] or now_ms()})
             BUS.publish("sos.on", {**self.sos, "at": now_ms()})
+            icon = "☠️" if level == "critical" else "⚠️"
             self.log("sos", "connector-bot",
-                     f"☠️ SOS {level.upper()} — " + "; ".join(reasons)[:220],
+                     f"{icon} SOS {level.upper()} — " + "; ".join(reasons)[:220],
                      {"reasons": reasons})
-            for bot in self.registry.all():
-                if bot.bot_id not in ("connector-bot",):
-                    self.registry.set_mood(bot.bot_id, "sad", 40)
+            if level == "critical":
+                # a real outage is felt by the whole crew; an amber prompt
+                # (e.g. "no keys yet") must not sadden 28 innocent bots
+                for bot in self.registry.all():
+                    if bot.bot_id not in ("connector-bot",):
+                        self.registry.set_mood(bot.bot_id, "sad", 40)
             # Live transport failure = stop trading.  Simulation fallback keeps the
             # workflow visible (labelled SIMULATION) so the operator can watch it.
             simulate = (self.hub.transport == "sim"
@@ -920,6 +962,9 @@ class TradingEngine:
                      f"{symbol}: protection failed — position closed immediately (fail-safe)")
             return None
 
+        # the entry commission is *paid now*: remember it on the row so a close
+        # that happens in a later run (after a restart) still books this leg
+        entry_fee = abs(float(plan.qty)) * float(entry) * TAKER_FEE
         trade_row = {
             "symbol": symbol, "side": side, "status": "open", "qty": plan.qty,
             "entry_price": entry, "leverage": cfg.risk.leverage, "margin": plan.margin,
@@ -929,11 +974,14 @@ class TradingEngine:
             "tp_atr_mult": (tp_mult if tp_on else 0.0),
             "risk_mode": cfg.risk.risk_mode,
             "opened_at": now_ms(), "close_reason": None,
-            "gross_pnl": 0.0, "fee_paid": 0.0, "funding_paid": 0.0, "net_pnl": 0.0,
+            "gross_pnl": 0.0, "fee_paid": 0.0, "entry_fee": entry_fee,
+            "funding_paid": 0.0, "net_pnl": 0.0,
             "signal_confidence": proposal.confidence, "signal_tier": opp.tier,
             "analyst_id": proposal.analyst_id, "scanner_id": opp.scanner_id,
             "exec_bot_id": exec_bot_id, "monitor_bot_id": "",
             "entry_order_id": order.order_id, "exit_order_id": "",
+            "sl_order_id": sl_order_id, "peak_price": entry,
+            "trail_active": 0, "trail_stop": 0.0,
             "mode": self.hub.mode,
             "notes": json.dumps({
                 "features": opp.features, "factors": proposal.factors,
@@ -1101,7 +1149,14 @@ class TradingEngine:
         entry = float(trade["entry_price"])
         mark = pos.mark_price or self.hub.price(trade["symbol"])
         side = trade["side"]
-        pnl = (mark - entry) * float(trade["qty"]) * (1 if side == "LONG" else -1)
+        qty = float(trade["qty"])
+        margin = float(trade.get("margin") or 0.0)
+        pnl = (mark - entry) * qty * (1 if side == "LONG" else -1)
+        roi = roi_points(entry, mark, qty, margin, side)
+        # the ROI trail protects a winner: it only ever tightens the single stop
+        await self._trail_tick(trade, pos, mark, bot_id)
+        sl_now = float(trade.get("sl_price") or 0)
+        sl_roi = roi_points(entry, sl_now, qty, margin, side) if sl_now else 0.0
         tp = float(trade.get("tp_price") or 0)
         sl = float(trade.get("sl_price") or 0)
         liq = pos.liquidation_price or float(trade.get("liquidation_price") or 0)
@@ -1112,14 +1167,20 @@ class TradingEngine:
             dist_liq = abs(mark - liq) / mark * 100.0
             if dist_liq < 2.0:
                 warn = f"⚠ {dist_liq:.2f}% from liquidation"
+        peak = float(trade.get("peak_price") or entry)
+        peak_roi = roi_points(entry, peak, qty, margin, side)
         state = {
             "trade_id": trade["id"], "symbol": trade["symbol"], "side": side,
-            "qty": float(trade["qty"]), "entry": entry, "mark": mark,
+            "qty": qty, "entry": entry, "mark": mark, "margin": margin,
             "unrealized": round(pnl, 4), "tp": tp, "sl": sl, "liq": liq,
             "to_tp_pct": round(to_tp, 3), "to_sl_pct": round(to_sl, 3),
             "leverage": trade["leverage"], "monitor_id": bot_id,
             "opened_at": trade["opened_at"], "confidence": trade.get("signal_confidence"),
             "warning": warn,
+            "roi_pct": round(roi, 3), "peak_roi_pct": round(peak_roi, 3),
+            "stop_roi_pct": round(roi_points(entry, sl, qty, margin, side), 3) if sl else 0.0,
+            "trail_active": bool(trade.get("trail_active")),
+            "trail_stop": float(trade.get("trail_stop") or 0.0),
         }
         BUS.publish("trade.tick", state)
         self.registry.set_status(bot_id, "working", f"watching {trade['symbol']}",
@@ -1129,6 +1190,159 @@ class TradingEngine:
         if warn:
             self.registry.set_mood(bot_id, "worried", 15)
         self.registry.publish(bot_id, GOVERNOR.snapshot())
+
+    async def _trail_tick(self, trade: dict, pos: Position, mark: float,
+                          bot_id: str = "") -> None:
+        """
+        ROI trailing stop (one order, always the same one).
+
+        The user's rule: once the position's ROI (P&L ÷ margin) has reached
+        +25 %, keep the stop 15 ROI-points behind the best price seen — so the
+        stop starts at +10 % ROI and ratchets up with the market.  The trail
+        *moves* the protective STOP_MARKET order that already exists; it never
+        adds a second one, never loosens, never crosses the liquidation price
+        and never sits on the losing side of the entry.
+        """
+        cfg = self.store.cfg.risk
+        enabled, activation, distance, min_step = cfg.trail()
+        if not enabled:
+            return
+        symbol = trade["symbol"]
+        side = trade["side"]
+        entry = float(trade["entry_price"])
+        qty = float(trade["qty"])
+        margin = float(trade.get("margin") or 0.0)
+        if qty <= 0 or margin <= 0 or symbol in self.pending_close:
+            return
+
+        # ── anchor the peak to the best mark we have seen ────────────────
+        peak = float(trade.get("peak_price") or entry)
+        new_peak = max(peak, mark) if side == "LONG" else min(peak, mark)
+        if abs(new_peak - peak) > 0:
+            trade["peak_price"] = new_peak
+            with contextlib.suppress(Exception):
+                await DB.update_trade(int(trade["id"]), {"peak_price": new_peak})
+            peak = new_peak
+
+        prev_stop = float(trade.get("sl_price") or 0.0)
+        stop, armed = trail_stop_price(
+            entry=entry, side=side, peak_price=peak, mark=mark, qty=qty, margin=margin,
+            prev_stop=prev_stop, activation_roi=activation, distance_roi=distance,
+            mark_gap_pct=cfg.trail_mark_gap_pct)
+        if not armed:
+            return
+
+        liq = float(pos.liquidation_price or trade.get("liquidation_price") or 0.0)
+        if liq > 0:                                  # belt & braces: never past liq
+            if side == "LONG":
+                stop = max(stop, liq * 1.001)
+            else:
+                stop = min(stop, liq * 0.999)
+        if (side == "LONG" and stop <= prev_stop) or (side == "SHORT" and stop >= prev_stop):
+            return                                   # nothing better to do
+        step = roi_price_step(margin, qty)
+        gain_roi = abs(stop - prev_stop) / step if step else 0.0
+        if trade.get("trail_active") and gain_roi < min_step:
+            return                                   # throttle the order churn
+
+        flt = self.hub.filters.get(symbol)
+        if flt:
+            stop = round_tick(stop, flt.tick_size)
+        peak_roi = roi_points(entry, peak, qty, margin, side)
+        locked_roi = roi_points(entry, stop, qty, margin, side)
+
+        # ── move the ONE protective order ────────────────────────────────
+        old_order = str(trade.get("sl_order_id") or "")
+        if not old_order:                      # rows written before the column
+            with contextlib.suppress(Exception):
+                old_order = str(json.loads(trade.get("notes") or "{}").get("sl_order_id") or "")
+        if not old_order:                      # last resort: ask the venue
+            with contextlib.suppress(Exception):
+                for o in await self.hub.open_orders(symbol):
+                    if str(o.get("type")) == "STOP_MARKET":
+                        old_order = str(o.get("orderId") or "")
+                        break
+        order = None
+        try:
+            if old_order:
+                await self.hub.cancel_order(symbol, old_order)
+            order = await self.hub.stop_market(
+                symbol, "SELL" if side == "LONG" else "BUY", stop, close_position=True,
+                client_id=f"SRtr{int(time.time())}")
+        except RateLimitHalt as exc:
+            self._note_blocked(bot_id or "monitor-team", str(exc))
+            with contextlib.suppress(Exception):     # put the old stop back
+                if old_order and order is None:
+                    back = await self.hub.stop_market(
+                        symbol, "SELL" if side == "LONG" else "BUY", prev_stop,
+                        close_position=True, client_id=f"SRtr{int(time.time())}b")
+                    trade["sl_order_id"] = back.order_id
+                    await DB.update_trade(int(trade["id"]), {"sl_order_id": back.order_id})
+            return
+        except Exception as exc:
+            self.log("error", bot_id or "monitor-team",
+                     f"{symbol}: trail re-place failed ({str(exc)[:140]}) — restoring the "
+                     f"previous stop", topic="monitor")
+            restored = False
+            with contextlib.suppress(Exception):
+                if old_order:
+                    back = await self.hub.stop_market(
+                        symbol, "SELL" if side == "LONG" else "BUY", prev_stop,
+                        close_position=True, client_id=f"SRtr{int(time.time())}b")
+                    trade["sl_order_id"] = back.order_id
+                    await DB.update_trade(int(trade["id"]), {"sl_order_id": back.order_id})
+                    restored = True
+            if not restored:
+                # never hold an unprotected position: if we cannot put a stop
+                # back, flatten now rather than trade naked
+                self.log("sos", bot_id or "monitor-team",
+                         f"{symbol}: no stop could be placed after the trail failed — "
+                         f"flattening to stay protected")
+                await self._close_trade(int(trade["id"]), "protection_lost")
+            return
+
+        armed_now = not bool(trade.get("trail_active"))
+        patch = {"sl_price": stop, "trail_stop": stop, "trail_active": 1,
+                 "sl_order_id": order.order_id if order else old_order}
+        trade.update(patch)
+        trade["notes"] = self._notes_with(trade, sl_order_id=patch["sl_order_id"])
+        with contextlib.suppress(Exception):
+            await DB.update_trade(int(trade["id"]), {**patch, "notes": trade["notes"]})
+        with contextlib.suppress(Exception):
+            await DB.add_trade_event(int(trade["id"]), "trail",
+                                     {"stop": stop, "peak": peak, "peak_roi": round(peak_roi, 3),
+                                      "locked_roi": round(locked_roi, 3),
+                                      "armed": armed_now})
+        icon = "🔒" if armed_now else "⤴"
+        self.log("success", bot_id or "monitor-team",
+                 f"{symbol}: {icon} ROI trail {'armed' if armed_now else 'raised'} — peak "
+                 f"+{peak_roi:.1f}% ROI, stop {stop:.8g} locks +{locked_roi:.1f}% ROI "
+                 f"(rule: arm {activation:.0f}%, trail {distance:.0f} pts)",
+                 {"trade_id": trade["id"], "stop": stop, "peak": peak,
+                  "peak_roi": round(peak_roi, 3), "locked_roi": round(locked_roi, 3)},
+                 topic="monitor")
+        self.registry.set_status(bot_id or "monitor-team", "success",
+                                 f"trail on {symbol}",
+                                 message=f"stop locks +{locked_roi:.1f}% ROI "
+                                         f"(peak +{peak_roi:.1f}%)")
+        self.registry.set_mood("guardian-bot", "happy", 20)
+        BUS.publish("trade.trail", {"trade_id": trade["id"], "symbol": symbol,
+                                    "stop": stop, "peak": peak,
+                                    "peak_roi": round(peak_roi, 3),
+                                    "locked_roi": round(locked_roi, 3),
+                                    "armed": armed_now})
+
+    @staticmethod
+    def _notes_with(trade: dict, **values: Any) -> str:
+        """Update a few keys inside the trade's JSON notes blob."""
+        try:
+            data = json.loads(trade.get("notes") or "{}")
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        data.update(values)
+        return json.dumps(data)
 
     async def _handle_reverse_exits(self, opportunities: list[Opportunity]) -> None:
         """Indicator flip in the opposite direction closes the position instantly."""
@@ -1251,6 +1465,14 @@ class TradingEngine:
                 gross = sum(f.realized_pnl for f in used)
                 fee = sum(f.commission for f in used
                           if f.commission_asset in ("USDT", ""))
+                # the opening fill carries no realized P&L — if no such fill is
+                # in the window (it was filled by a previous run, before the
+                # restart) the entry commission is still owed to the P&L
+                opening = any(f.realized_pnl == 0 or (entry_oid and f.order_id == entry_oid)
+                              for f in used)
+                if not opening:
+                    fee += float(trade.get("entry_fee") or 0.0) \
+                        or abs(qty) * entry * TAKER_FEE
                 closing = [f for f in used if f.realized_pnl]
                 if closing:
                     exit_price = closing[-1].price or exit_price
@@ -1357,9 +1579,9 @@ class TradingEngine:
                 return "tp"
         if sl and exit_price > 0:
             if side == "LONG" and exit_price <= sl * 1.001:
-                return "sl"
+                return "trail" if trade.get("trail_active") else "sl"
             if side == "SHORT" and exit_price >= sl * 0.999:
-                return "sl"
+                return "trail" if trade.get("trail_active") else "sl"
         return "manual" if not orders_cancelled else "sl_or_tp"
 
     # ============================================================ maintenance
@@ -1441,7 +1663,8 @@ class TradingEngine:
         journal_fees = sum(abs(float(r.get("fee_paid") or 0)) for r in closed)
         journal_funding = sum(float(r.get("funding_paid") or 0) for r in closed)
         open_fees = sum(
-            abs(float(t.get("qty") or 0)) * float(t.get("entry_price") or 0) * 0.0005
+            float(t.get("entry_fee") or 0.0)
+            or abs(float(t.get("qty") or 0)) * float(t.get("entry_price") or 0) * TAKER_FEE
             for t in self.open_trades.values())
         out: dict[str, Any] = {
             "journal_net": round(journal_net, 4),
@@ -1496,6 +1719,10 @@ class TradingEngine:
             positions = {r["symbol"] for r in rows}
         for row in rows:
             if row["symbol"] in positions:
+                if not row.get("sl_order_id"):
+                    with contextlib.suppress(Exception):
+                        row["sl_order_id"] = str(json.loads(row.get("notes") or "{}")
+                                                 .get("sl_order_id") or "")
                 self.open_trades[int(row["id"])] = row
                 self.symbol_to_trade[row["symbol"]] = int(row["id"])
             else:

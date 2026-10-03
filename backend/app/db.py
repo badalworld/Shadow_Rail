@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS trades (
     close_reason      TEXT,                     -- tp | sl | reverse_signal | manual | liquidation | emergency
     gross_pnl         REAL DEFAULT 0,
     fee_paid          REAL DEFAULT 0,
+    entry_fee         REAL DEFAULT 0,           -- entry leg, booked at open
     funding_paid      REAL DEFAULT 0,           -- positive = paid, negative = received
     net_pnl           REAL DEFAULT 0,
     r_multiple        REAL,
@@ -57,6 +58,10 @@ CREATE TABLE IF NOT EXISTS trades (
     monitor_bot_id    TEXT,
     entry_order_id    TEXT,
     exit_order_id     TEXT,
+    sl_order_id       TEXT,                     -- the LIVE protective stop order
+    peak_price        REAL DEFAULT 0,           -- best mark seen (trail anchor)
+    trail_active      INTEGER DEFAULT 0,        -- ROI trail armed
+    trail_stop        REAL DEFAULT 0,           -- last trail price we placed
     mode              TEXT DEFAULT 'live',
     pnl_source        TEXT DEFAULT 'fills',      -- fills | estimated | unknown
     notes             TEXT,
@@ -140,6 +145,20 @@ class Database:
         if "pnl_source" not in cols:
             await self.conn.execute(
                 "ALTER TABLE trades ADD COLUMN pnl_source TEXT DEFAULT 'fills'")
+        for column, ddl in (
+            ("sl_order_id", "TEXT"),
+            ("peak_price", "REAL DEFAULT 0"),
+            ("trail_active", "INTEGER DEFAULT 0"),
+            ("trail_stop", "REAL DEFAULT 0"),
+        ):
+            if column not in cols:
+                await self.conn.execute(f"ALTER TABLE trades ADD COLUMN {column} {ddl}")
+        if "entry_fee" not in cols:
+            # the entry commission is paid at open; a close that happens in a
+            # later run (restart) must still be able to book it, otherwise the
+            # released P&L misses that leg and the equity bridge breaks
+            await self.conn.execute(
+                "ALTER TABLE trades ADD COLUMN entry_fee REAL DEFAULT 0")
         await self.conn.commit()
 
     async def close(self) -> None:

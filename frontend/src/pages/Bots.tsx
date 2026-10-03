@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import { Award, Crown, Filter } from 'lucide-react'
-import { useStore } from '../state/store'
+import { WORKFLOW_STAGES, useStore } from '../state/store'
 import { endpoints } from '../lib/api'
 import { Bar, Chip, Panel, fmtNum, moodEmoji, statusColor, timeAgo } from '../components/Glass'
 import { BotAvatar } from '../components/BotAvatar'
@@ -9,7 +9,7 @@ import type { Bot } from '../lib/types'
 const RANK_ORDER = ['Recruit', 'Operative', 'Specialist', 'Elite', 'Legend']
 
 export const Bots: React.FC = () => {
-  const { bots, botMap, api, pushToast } = useStore()
+  const { bots, botMap, api, pushToast, status } = useStore()
   const [group, setGroup] = useState('all')
   const [selected, setSelected] = useState<string | null>(null)
   const [detail, setDetail] = useState<any>(null)
@@ -25,6 +25,42 @@ export const Bots: React.FC = () => {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
+      {/* ── the pipeline the swarm is currently walking ─────────────────── */}
+      <Panel
+        title="Pipeline stages"
+        right={
+          <div className="flex flex-wrap items-center gap-2">
+            <Chip color="var(--color-cyan)">{(status?.workflow?.stage || 'idle').toString()}</Chip>
+            <Chip>cycle #{status?.cycle ?? 0}</Chip>
+          </div>
+        }
+        bodyClass="p-2"
+      >
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
+          {WORKFLOW_STAGES.map((s, i) => {
+            const st = (status?.workflow?.stages || {})[s.key] || { status: 'idle', detail: '' }
+            const active = st.status === 'start'
+            const done = st.status === 'done'
+            const color = statusColor(st.status === 'done' ? 'success'
+              : st.status === 'error' ? 'error' : st.status)
+            return (
+              <div key={s.key} className="glass-row px-2 py-1.5"
+                style={active ? { borderColor: color, boxShadow: 'var(--sr-glow)' } : undefined}>
+                <div className="flex items-center gap-1.5">
+                  <span className={`pulse-dot ${active ? 'animate-pulse' : ''}`}
+                    style={{ background: color, width: 7, height: 7 }} />
+                  <span className="mono text-[0.58rem] dim">{String(i + 1).padStart(2, '0')}</span>
+                  <span className="truncate text-[0.72rem]">{s.label}</span>
+                </div>
+                <p className="truncate text-[0.6rem] dim" title={st.detail}>
+                  {done ? 'done' : st.detail || st.status}
+                </p>
+              </div>
+            )
+          })}
+        </div>
+      </Panel>
+
       <div className="flex flex-wrap items-center gap-2">
         <Chip color="var(--color-bull)">{bots.length} agents online</Chip>
         <Chip color="var(--color-cyan)">{bots.filter((b) => b.status === 'working').length} working</Chip>

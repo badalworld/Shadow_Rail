@@ -27,6 +27,7 @@ from .exchange.binance import BinanceFutures
 from .indicators import ghost
 from .journal import JOURNAL
 from .ratelimit import GOVERNOR
+from .risk import roi_points
 from .util import now_ms, now_iso
 
 app = FastAPI(title="Shadow Rail API", version="1.0.0",
@@ -314,11 +315,28 @@ async def open_trades_payload(e: TradingEngine) -> dict:
         entry = float(t["entry_price"])
         qty = float(t["qty"])
         upnl = (mark - entry) * qty * (1 if t["side"] == "LONG" else -1)
+        margin = float(t.get("margin") or 0.0)
+        side = t["side"]
+        roi = roi_points(entry, mark, qty, margin, side) if margin else 0.0
+        peak = float(t.get("peak_price") or entry)
+        sl = float(t.get("sl_price") or 0.0)
+        trail_on, activation, distance, _step = STORE.cfg.risk.trail()
         out.append({**{k: v for k, v in t.items() if k != "notes"},
                     "mark": mark, "unrealized": round(upnl, 4),
-                    "unrealized_pct": round((upnl / max(1e-9, float(t["margin"]))) * 100.0, 2),
+                    "unrealized_pct": round((upnl / max(1e-9, margin)) * 100.0, 2),
                     "liquidation_live": pos.liquidation_price if pos else t.get("liquidation_price"),
-                    "monitor_id": t.get("monitor_bot_id")})
+                    "monitor_id": t.get("monitor_bot_id"),
+                    # ── ROI trail (arm at +25 %, stop 15 ROI behind the peak)
+                    "roi_pct": round(roi, 3),
+                    "peak_roi_pct": round(roi_points(entry, peak, qty, margin, side), 3)
+                    if margin else 0.0,
+                    "stop_roi_pct": round(roi_points(entry, sl, qty, margin, side), 3)
+                    if (margin and sl) else 0.0,
+                    "trail_enabled": trail_on,
+                    "trail_activation_roi_pct": activation,
+                    "trail_distance_roi_pct": distance,
+                    "trail_active": bool(t.get("trail_active")),
+                    "trail_stop": float(t.get("trail_stop") or 0.0)})
     return {"trades": out, "count": len(out),
             "max": STORE.cfg.risk.max_concurrent_trades}
 

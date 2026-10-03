@@ -428,3 +428,42 @@ async def _set_price_engine(hub) -> None:
     for sym in list(hub.exchange.syms.keys()):
         await hub.exchange.step_bar()
         break
+
+
+async def test_connector_stays_amber_until_keys_are_provided(db, store):
+    """A fresh install must not scream ☠️ SOS just because no keys exist yet —
+    but a *configured* link that fails must."""
+    eng = await make_engine(store)
+    store.cfg.binance.mode = "live"
+    store.save()
+
+    healthy_sim = {"connected": True, "problems": [], "transport": "sim"}
+    eng.hub.last_error = "No Binance API credentials configured"
+    level, problems = eng._connector_verdict(healthy_sim)
+    assert level == "warning", level
+    assert any("credentials" in p.lower() for p in problems)
+
+    # keys stored + the Binance link fell back to the simulator → the siren
+    store.update({"binance": {"api_key": "KEY123", "api_secret": "SECRET123"}})
+    assert store.api_key() == "KEY123" and store.api_secret() == "SECRET123"
+    level, problems = eng._connector_verdict(healthy_sim)
+    assert level == "critical", level
+    assert any("credentials" in p.lower() or "unreachable" in p.lower() for p in problems)
+
+    # keys stored and the live link is healthy → green
+    eng.hub.transport = "binance"
+    eng.hub.last_error = ""
+    level, problems = eng._connector_verdict(
+        {"connected": True, "problems": [], "transport": "binance"})
+    assert level == "none", (level, problems)
+
+
+async def test_sos_siren_is_reserved_for_a_configured_link(db, store):
+    """sim.transport probe that never connected, with no keys, is a warning."""
+    eng = await make_engine(store)
+    store.cfg.binance.mode = "live"
+    store.cfg.engine.simulate_when_offline = True
+    store.save()
+    eng.hub.last_error = "No Binance API credentials configured"
+    level, _ = eng._connector_verdict({"connected": False, "problems": [], "transport": "sim"})
+    assert level == "warning"

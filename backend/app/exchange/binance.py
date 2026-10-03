@@ -434,6 +434,16 @@ class BinanceFutures:
             if exc.code not in (-2011,):    # -2011 = unknown order / nothing to cancel
                 raise
 
+    async def cancel_order(self, symbol: str, order_id: str) -> None:
+        """Cancel a single order (the trail ratchets the stop, never the TP)."""
+        try:
+            await self._request("DELETE", "/fapi/v1/order", signed=True, op="order",
+                                params={"symbol": symbol, "orderId": str(order_id)},
+                                critical=True)
+        except ExchangeError as exc:
+            if exc.code not in (-2011, -2013):   # already gone — nothing to do
+                raise
+
     async def open_orders(self, symbol: str | None = None) -> list[dict]:
         params = {"symbol": symbol} if symbol else {}
         return await self._request("GET", "/fapi/v1/openOrders", signed=True,

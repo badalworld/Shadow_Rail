@@ -165,6 +165,15 @@ export interface Stats {
 
 export interface Trade {
   id: number
+  /** ROI on margin (leverage-adjusted) and the ROI trail state */
+  roi_pct?: number
+  peak_roi_pct?: number
+  stop_roi_pct?: number
+  trail_enabled?: boolean
+  trail_active?: boolean
+  trail_stop?: number
+  trail_activation_roi_pct?: number
+  trail_distance_roi_pct?: number
   symbol: string
   side: 'LONG' | 'SHORT'
   status: string

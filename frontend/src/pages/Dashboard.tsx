@@ -1,80 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import {
-  Activity, ArrowDownRight, ArrowUpRight, Coins, Gauge, Lock, Radio, Receipt,
-  ShieldCheck, TrendingUp, Users, Zap,
+  Activity, ArrowDownRight, ArrowUpRight, Coins, Gauge, Lock, Receipt, TrendingUp, Users, Zap,
 } from 'lucide-react'
-import { Panel, Stat, Chip, Bar, statusColor, moodEmoji, fmtMoney, fmtNum, fmtPct, clock } from '../components/Glass'
-import { Donut, LineChart } from '../components/Charts'
+import { Panel, Stat, Chip, Bar, moodEmoji, fmtMoney, fmtNum, fmtPct } from '../components/Glass'
 import { BotMap3D } from '../components/BotMap3D'
-import { endpoints } from '../lib/api'
 import { useStore } from '../state/store'
 import type { PageKey } from '../components/Layout'
-import type { Reconcile } from '../lib/types'
 
-const STAGES: { key: string; label: string; bots: string }[] = [
-  { key: 'connector', label: 'Connector', bots: 'ORACLE' },
-  { key: 'scan', label: 'Scan ×5', bots: 'VEGA · NOVA · ORION · LYRA · ATLAS' },
-  { key: 'analyze', label: 'Analyse ×10', bots: 'EINSTEIN … BOHR' },
-  { key: 'execute', label: 'Execute ×2', bots: 'BOLT · TITAN' },
-  { key: 'verify', label: 'Verify', bots: 'ECHO' },
-  { key: 'monitor', label: 'Monitor ×4', bots: 'SENTINEL · WARDEN · WATCHMAN · GUARDIAN' },
-  { key: 'close', label: 'Journal', bots: 'LEDGER · BANKER · AEGIS' },
-]
-
-const MiniStat: React.FC<{ label: string; value: string; tone?: 'bull' | 'bear' }> = ({ label, value, tone }) => (
-  <div>
-    <p className="text-[0.58rem] uppercase tracking-wider dim">{label}</p>
-    <p className="mono text-[0.78rem]" style={{
-      color: tone === 'bull' ? 'var(--color-bull)' : tone === 'bear' ? 'var(--color-bear)' : undefined,
-    }}>{value}</p>
-  </div>
-)
-
-function levelColor(level: string): string {
-  switch (level) {
-    case 'error': return 'var(--color-bear)'
-    case 'warn': return 'var(--color-amber)'
-    case 'success': return 'var(--color-bull)'
-    case 'sos': return '#ff2b4e'
-    default: return 'var(--sr-dim)'
-  }
-}
-
+/**
+ * The Command Deck: one thing only — the 3D bot work zone with the six numbers
+ * the operator must never lose sight of.  Everything else lives in the menu
+ * (Open Positions, Scan, Closed Trades, Roster, Logs, Settings).
+ */
 export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) => {
   const { status, equity, stats, openTrades, bots, links, logs, scan, pulses, sos } = useStore()
   const [selected, setSelected] = useState<string | null>(null)
-  const [curve, setCurve] = useState<{ x: number; y: number }[]>([])
-  const [ledger, setLedger] = useState<Reconcile | null>(null)
-
-  // real equity curve (chronological), refreshed while the page is open
-  useEffect(() => {
-    let alive = true
-    const load = async () => {
-      try {
-        const res = await endpoints.equityCurve(400)
-        if (!alive) return
-        const pts = (res.points || res.curve || []).map((p: any) => ({ x: p.ts, y: p.equity }))
-        setCurve(pts)
-      } catch { /* the socket will retry */ }
-    }
-    load()
-    const t = window.setInterval(load, 20_000)
-    return () => { alive = false; window.clearInterval(t) }
-  }, [])
-
-  // journal ↔ exchange ledger check (the accounting honesty strip)
-  useEffect(() => {
-    let alive = true
-    const load = async () => {
-      try {
-        const res = await endpoints.reconcile()
-        if (alive) setLedger(res)
-      } catch { /* keep the previous verdict */ }
-    }
-    load()
-    const t = window.setInterval(load, 30_000)
-    return () => { alive = false; window.clearInterval(t) }
-  }, [])
 
   const wf = status?.workflow?.stages || {}
   const groups = useMemo(() => {
@@ -92,10 +32,136 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
   const working = bots.filter((b) => b.status === 'working').length
   const risk = status?.risk
   const critic = sos.active && sos.level === 'critical'
+  const trailing = openTrades.filter((t) => t.trail_active).length
+  const pulsesThisCycle = pulses.length
+  const nameOf = (id: string) =>
+    bots.find((b) => b.bot_id === id)?.name || id.replace(/-bot$/, '').replace(/-/g, ' ').toUpperCase()
+
+  // the newest engine line drives the "what is the swarm doing" ticker
+  const activity = useMemo(() => {
+    const line = logs?.[0]
+    if (!line) return 'waiting for the first engine cycle…'
+    return `${line.bot_id || line.level}: ${line.message}`
+  }, [logs])
+
+  useEffect(() => {
+    if (!selected) return
+    const t = window.setTimeout(() => setSelected(null), 45_000)
+    return () => window.clearTimeout(t)
+  }, [selected])
 
   return (
-    <div className="flex flex-col gap-3">
-      {/* ── headline numbers ─────────────────────────────────────────── */}
+    <div className="scroll-thin flex h-full min-h-0 flex-col gap-3 overflow-y-auto pr-0.5">
+      {/* ── the work zone ─────────────────────────────────────────────── */}
+      <Panel
+        title="Bot Work Zone — live 3D swarm"
+        right={
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Chip>cycle #{status?.cycle ?? 0}</Chip>
+            <Chip color="var(--color-cyan)">{working} working · {pulsesThisCycle} pulses</Chip>
+            {trailing > 0 && <Chip color="var(--color-cyan)">🔒 {trailing} trailing</Chip>}
+            <Chip color="var(--color-amber)">
+              bar closes in {Math.max(0, Math.round(scan.seconds_to_close || 0))}s
+            </Chip>
+          </div>
+        }
+        bodyClass="p-2"
+      >
+        <div className="relative h-[calc(100vh-21rem)] min-h-[30rem] w-full overflow-hidden rounded-xl">
+          <BotMap3D
+            bots={bots}
+            links={links}
+            pulses={pulses}
+            danger={critic}
+            onSelect={setSelected}
+            className="h-full w-full"
+          />
+
+          {/* live activity tickers (pure bot activity — no charts here) */}
+          <div className="pointer-events-none absolute left-3 top-3 max-w-[46%]">
+            <p className="text-[0.58rem] uppercase tracking-[0.18em] dim">swarm activity</p>
+            <p className="mono truncate text-[0.7rem]" title={activity}>{activity}</p>
+            {pulses.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {pulses.slice(0, 4).map((p) => (
+                  <span key={p.id} className="chip" style={{ fontSize: '0.56rem' }}>
+                    {nameOf(p.from)} → {nameOf(p.to)}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* team load — the only overlay the operator asks for mid-flight */}
+          <div className="absolute right-3 top-14 flex w-[13.5rem] flex-col gap-1">
+            {risk?.label && <Chip>{risk.label}</Chip>}
+            {Object.entries(groups).map(([g, v]) => (
+              <button
+                key={g}
+                onClick={() => goTo?.('bots')}
+                className="glass-row flex items-center justify-between px-2 py-1 text-left"
+                style={{ cursor: 'pointer' }}
+                title={`${g}: ${v.working}/${v.total} active`}
+              >
+                <span className="flex items-center gap-1.5 text-[0.62rem] uppercase tracking-wider dim">
+                  <Users size={10} /> {g}
+                </span>
+                <span className="mono text-[0.68rem]">
+                  <span style={{ color: v.working ? 'var(--color-cyan)' : 'var(--sr-text)' }}>{v.working}</span>
+                  <span className="dim">/{v.total}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {/* bot inspector — floats over the zone, never pushes the layout */}
+          {selected && (
+            <div className="glass-solid absolute bottom-3 right-3 max-w-[22rem] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[0.6rem] uppercase tracking-wider dim">bot activity</span>
+                <button className="chip" style={{ cursor: 'pointer' }}
+                  onClick={() => setSelected(null)}>close</button>
+              </div>
+              {(() => {
+                const b = bots.find((x) => x.bot_id === selected)
+                if (!b) {
+                  return (
+                    <p className="pt-1 text-[0.7rem] dim">
+                      That rail is a whole team — open the Bot Roster for its members.
+                    </p>
+                  )
+                }
+                const stage = wf[stageFor(b.group)]?.detail || ''
+                return (
+                  <div className="pt-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">{moodEmoji(b.mood)}</span>
+                      <div>
+                        <p className="mono text-[0.82rem]">{b.name}</p>
+                        <p className="text-[0.64rem] dim">{b.role} · {b.rank}</p>
+                      </div>
+                    </div>
+                    <div className="mt-2">
+                      <Bar value={b.progress} color={b.color} glow />
+                      <p className="pt-1 text-[0.68rem]">{b.task || b.message || b.status}</p>
+                      {stage && <p className="text-[0.62rem] dim">stage: {stage}</p>}
+                    </div>
+                    <div className="mono mt-2 flex gap-3 text-[0.62rem] dim">
+                      <span>score {Math.round(b.metrics?.score ?? 0)}</span>
+                      <span>tasks {b.metrics?.tasks_done ?? 0}</span>
+                      <span style={{ color: 'var(--color-bull)' }}>w {b.metrics?.wins ?? 0}</span>
+                      <span style={{ color: 'var(--color-bear)' }}>e {b.metrics?.errors ?? 0}</span>
+                      <span>api {b.metrics?.api_spent_window ?? 0}</span>
+                    </div>
+                  </div>
+                )
+              })()}
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      {/* ── the six numbers ───────────────────────────────────────────── */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <Stat
           label="Starting Balance"
@@ -104,7 +170,7 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
           icon={<Lock size={13} />}
           tone="accent"
           sub={equity?.starting_at
-            ? `locked ${new Date(equity.starting_at).toLocaleString()} · ${equity.starting_source || ''}`
+            ? `locked ${new Date(equity.starting_at).toLocaleString()}`
             : 'locks on the first connection'}
         />
         <Stat
@@ -115,14 +181,16 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
           sub={`${fmtPct(equity?.growth_pct)} since start · free ${fmtMoney(equity?.available)}`}
         />
         <Stat
-          label="Open Positions"
+          label="Opened Positions"
           value={`${equity?.open_positions ?? 0} / ${equity?.max_trades ?? 10}`}
           icon={<Activity size={13} />}
           tone="warn"
-          sub={`margin ${fmtMoney(equity?.margin_used)} of ${fmtMoney(equity?.margin_budget)}`}
+          sub={trailing > 0
+            ? `${trailing} protected by the ROI trail`
+            : `margin ${fmtMoney(equity?.margin_used)} of ${fmtMoney(equity?.margin_budget)}`}
         />
         <Stat
-          label="Released P&L"
+          label="Realised P&L"
           value={fmtMoney(equity?.released_pnl)}
           icon={<TrendingUp size={13} />}
           tone={(equity?.released_pnl ?? 0) >= 0 ? 'good' : 'bad'}
@@ -143,345 +211,20 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
           sub={`${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L · ${total} closed · PF ${fmtNum(stats?.profit_factor, 2)}`}
         />
       </div>
-
-      {/* ── ledger check: starting + released + unrealised − fees = equity ── */}
-      {equity && (
-        <Panel
-          title="Ledger check"
-          right={
-            <div className="flex items-center gap-2">
-              <Chip color={ledger && ledger.exchange_net != null
-                ? (ledger.balanced ? 'var(--color-bull)' : 'var(--color-bear)')
-                : 'var(--color-amber)'}>
-                {ledger && ledger.exchange_net != null
-                  ? (ledger.balanced ? 'venue reconciled' : 'drift detected')
-                  : 'venue ledger pending'}
-              </Chip>
-              <Chip>{ledger?.transport || status?.transport || 'sim'}</Chip>
-            </div>
-          }
-          bodyClass="p-2"
-        >
-          <div className="grid grid-cols-2 gap-2 px-1 md:grid-cols-4 xl:grid-cols-6">
-            <MiniStat label="Starting" value={fmtMoney(equity.starting_balance)} />
-            <MiniStat label="+ Released P&L" value={fmtMoney(equity.released_pnl)}
-              tone={(equity.released_pnl ?? 0) >= 0 ? 'bull' : 'bear'} />
-            <MiniStat label="+ Unrealised" value={fmtMoney(equity.unrealized)}
-              tone={(equity.unrealized ?? 0) >= 0 ? 'bull' : 'bear'} />
-            <MiniStat label="− Open entry fees" value={fmtMoney(-(equity.open_entry_fees ?? 0))} />
-            <MiniStat label="= Equity" value={fmtMoney(equity.equity)} />
-            <MiniStat
-              label={ledger && ledger.exchange_net != null ? 'Journal ↔ venue' : 'Equity bridge'}
-              value={ledger && ledger.exchange_net != null
-                ? `${(ledger.net_drift ?? 0) >= 0 ? '+' : ''}${fmtNum(ledger.net_drift, 4)}`
-                : fmtNum(equity.equity_bridge, 4)}
-              tone={ledger && ledger.exchange_net != null
-                ? (ledger.balanced ? 'bull' : 'bear')
-                : undefined}
-            />
-          </div>
-          <p className="px-1 pt-2 text-[0.65rem] dim">
-            Every closed trade is booked to the journal and re-checked against the venue's own
-            income ledger{ledger?.exchange_net != null
-              ? ` (realised ${fmtMoney(ledger.exchange_net)})`
-              : ''}. Drift above the tolerance raises a warning in the Log page.
-          </p>
-        </Panel>
-      )}
-
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1.55fr_1fr]">
-        {/* ── 3D swarm ─────────────────────────────────────────────── */}
-        <Panel
-          title="Bot Workflow — live 3D pipeline"
-          right={
-            <div className="flex flex-wrap items-center gap-2">
-              <Chip>cycle #{status?.cycle ?? 0}</Chip>
-              <Chip color="var(--color-cyan)">{working} bots working</Chip>
-              <Chip color="var(--color-amber)">
-                candle closes in {Math.max(0, Math.round(scan.seconds_to_close || 0))}s
-              </Chip>
-            </div>
-          }
-          bodyClass="p-2"
-        >
-          <div className="h-[22rem] w-full overflow-hidden rounded-xl md:h-[26rem]">
-            <BotMap3D
-              bots={bots}
-              links={links}
-              pulses={pulses}
-              danger={critic}
-              onSelect={setSelected}
-              className="h-full w-full"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-2 px-1 pt-2 md:grid-cols-4">
-            {Object.entries(groups).map(([g, v]) => (
-              <button
-                key={g}
-                onClick={() => goTo?.('bots')}
-                className="glass-row flex items-center justify-between px-2 py-1.5 text-left transition-transform hover:scale-[1.02]"
-                style={{ cursor: 'pointer' }}
-              >
-                <span className="flex items-center gap-1.5 text-[0.68rem] uppercase tracking-wider dim">
-                  <Users size={11} /> {g}
-                </span>
-                <span className="mono text-[0.72rem]">
-                  <span style={{ color: v.working ? 'var(--color-cyan)' : 'var(--sr-text)' }}>{v.working}</span>
-                  <span className="dim">/{v.total}</span>
-                </span>
-              </button>
-            ))}
-          </div>
-          <p className="px-1 pt-2 text-[0.65rem] dim">
-            Pulses travel the rails on every real event: Connector → CEO → Scanners → Analysts →
-            Execution → Verify → Monitor → Journal → Equity Manager.
-          </p>
-        </Panel>
-
-        <div className="flex flex-col gap-3">
-          {/* ── workflow rail ─────────────────────────────────────── */}
-          <Panel title="Pipeline stages" right={<Chip>{risk?.label || ''}</Chip>}>
-            <div className="flex flex-col gap-1.5">
-              {STAGES.map((s, i) => {
-                const st = wf[s.key] || { status: 'idle', detail: '' }
-                const color = statusColor(st.status === 'done' ? 'success' : st.status === 'error' ? 'error' : st.status)
-                const active = st.status === 'start'
-                const done = st.status === 'done'
-                return (
-                  <div
-                    key={s.key}
-                    className="glass-row relative flex items-center gap-2 px-2 py-1.5"
-                    style={active ? { borderColor: color, boxShadow: 'var(--sr-glow)' } : undefined}
-                  >
-                    <span className={`pulse-dot ${active ? 'animate-pulse' : ''}`}
-                      style={{ background: color, width: 7, height: 7 }} />
-                    <span className="mono text-[0.62rem] dim">{String(i + 1).padStart(2, '0')}</span>
-                    <span className="text-[0.78rem]" style={{ color: done || active ? 'var(--sr-text)' : undefined }}>
-                      {s.label}
-                    </span>
-                    <span className="ml-auto max-w-[50%] truncate text-right text-[0.62rem] dim" title={st.detail}>
-                      {st.detail || st.status}
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-          </Panel>
-
-          {/* ── equity ────────────────────────────────────────────── */}
-          <Panel
-            title="Equity"
-            right={
-              <span className="mono text-[0.8rem]"
-                style={{ color: (equity?.growth_pct ?? 0) >= 0 ? 'var(--color-bull)' : 'var(--color-bear)' }}>
-                {fmtPct(equity?.growth_pct)}
-              </span>
-            }
-          >
-            <div className="grid grid-cols-3 gap-2">
-              <MiniStat label="equity" value={fmtMoney(equity?.equity)} />
-              <MiniStat label="start 🔒" value={fmtMoney(equity?.starting_balance)} />
-              <MiniStat label="peak" value={fmtMoney(equity?.peak_equity)} />
-            </div>
-            <div className="mt-2 grid grid-cols-3 gap-2">
-              <MiniStat label="drawdown" value={`${(equity?.drawdown_pct ?? 0).toFixed(2)}%`} tone="bear" />
-              <MiniStat label="slots free" value={String(equity?.open_slots ?? 0)} />
-              <MiniStat label="today" value={fmtMoney(equity?.daily_pnl)}
-                tone={(equity?.daily_pnl ?? 0) >= 0 ? 'bull' : 'bear'} />
-            </div>
-            <div className="mt-3 flex items-center gap-4">
-              <Donut
-                slices={[
-                  { label: 'wins', value: stats?.wins ?? 0, color: 'var(--color-bull)' },
-                  { label: 'losses', value: stats?.losses ?? 0, color: 'var(--color-bear)' },
-                ]}
-                size={104}
-                center={
-                  <div className="text-center">
-                    <p className="mono text-[0.95rem]">{total ? `${winRate.toFixed(0)}%` : '—'}</p>
-                    <p className="text-[0.55rem] uppercase tracking-wider dim">{total} trades</p>
-                  </div>
-                }
-              />
-              <div className="flex-1 text-[0.7rem]">
-                <p className="dim">avg win <span className="mono" style={{ color: 'var(--color-bull)' }}>{fmtMoney(stats?.avg_win)}</span></p>
-                <p className="dim">avg loss <span className="mono" style={{ color: 'var(--color-bear)' }}>{fmtMoney(stats?.avg_loss)}</span></p>
-                <p className="dim">best <span className="mono">{stats?.best_symbol || '—'}</span></p>
-                <p className="dim">worst <span className="mono">{stats?.worst_symbol || '—'}</span></p>
-              </div>
-            </div>
-            <div className="mt-3 h-24">
-              {curve.length > 1
-                ? <LineChart data={curve} height={96} baseline={equity?.starting_balance} color="var(--color-cyan)" />
-                : <p className="pt-6 text-center text-[0.7rem] dim">equity curve builds as trades close</p>}
-            </div>
-          </Panel>
-        </div>
-      </div>
-
-      {/* ── open positions + ticker ───────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1.55fr_1fr]">
-        <Panel
-          title="Open positions"
-          right={
-            <div className="flex items-center gap-2">
-              <Chip color={openTrades.length > 0 ? 'var(--color-bull)' : undefined}>
-                {openTrades.length > 0 ? 'live' : 'flat'}
-              </Chip>
-              <button className="chip hover:opacity-80" style={{ cursor: 'pointer' }} onClick={() => goTo?.('trades')}>
-                history →
-              </button>
-            </div>
-          }
-          bodyClass="p-0"
-        >
-          {openTrades.length === 0 ? (
-            <div className="flex flex-col items-center gap-1 px-4 py-8 text-center">
-              <ShieldCheck size={22} style={{ color: 'var(--color-cyan)' }} />
-              <p className="text-[0.8rem]">Flat — scanners are hunting the next confirmed flip.</p>
-              <p className="text-[0.68rem] dim">
-                {risk ? `${risk.size_pct ?? ''}` : ''}one position per symbol · stop always inside liquidation
-              </p>
-            </div>
-          ) : (
-            <div className="scroll-thin overflow-x-auto">
-              <table className="w-full text-left text-[0.72rem]">
-                <thead className="text-[0.62rem] uppercase tracking-wider dim">
-                  <tr>
-                    <th className="px-3 py-2">Symbol</th>
-                    <th>Side</th>
-                    <th className="text-right">Entry</th>
-                    <th className="text-right">Mark</th>
-                    <th className="text-right">uPnL</th>
-                    <th className="text-right">SL / TP</th>
-                    <th className="text-right">Liq</th>
-                    <th className="px-3 text-right">Monitor</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {openTrades.map((t) => {
-                    const up = (t.unrealized ?? 0) >= 0
-                    const liqDist = t.mark && t.liquidation_price
-                      ? Math.abs((t.liquidation_price - t.mark) / t.mark) * 100 : 999
-                    return (
-                      <tr key={t.id} className="glass-row">
-                        <td className="px-3 py-1.5 mono">{t.symbol}</td>
-                        <td>
-                          <span className="flex items-center gap-1"
-                            style={{ color: t.side === 'LONG' ? 'var(--color-bull)' : 'var(--color-bear)' }}>
-                            {t.side === 'LONG' ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
-                            {t.side}
-                          </span>
-                        </td>
-                        <td className="mono text-right">{fmtNum(t.entry_price, 6)}</td>
-                        <td className="mono text-right">{fmtNum(t.mark, 6)}</td>
-                        <td className="mono text-right" style={{ color: up ? 'var(--color-bull)' : 'var(--color-bear)' }}>
-                          {fmtMoney(t.unrealized)} ({fmtPct(t.unrealized_pct)})
-                        </td>
-                        <td className="mono text-right dim">{fmtNum(t.sl_price, 6)} / {fmtNum(t.tp_price, 6)}</td>
-                        <td className="mono text-right"
-                          style={{ color: liqDist < 12 ? 'var(--color-bear)' : undefined }}>
-                          {fmtNum(t.liquidation_price, 6)}
-                        </td>
-                        <td className="px-3 text-right mono dim">{t.monitor_id || t.monitor_bot_id || '—'}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Panel>
-
-        <Panel title="Workflow log" right={<Chip color="var(--color-cyan)">{logs.length} lines</Chip>}>
-          <div className="scroll-thin flex max-h-[16rem] flex-col gap-1 overflow-y-auto pr-1">
-            {logs.length === 0 && <p className="text-[0.72rem] dim">no log lines yet</p>}
-            {logs.slice(0, 30).map((l, i) => (
-              <div key={`${l.ts}-${i}`} className="flex items-start gap-2 text-[0.68rem]">
-                <span className="mono shrink-0 dim">{clock(l.ts)}</span>
-                <span className="chip shrink-0"
-                  style={{ borderColor: levelColor(l.level), color: levelColor(l.level), fontSize: '0.55rem', padding: '0 0.3rem' }}>
-                  {(l.bot_id || l.level).slice(0, 15)}
-                </span>
-                <span className="min-w-0 flex-1 truncate" title={l.message}>{l.message}</span>
-              </div>
-            ))}
-          </div>
-        </Panel>
-      </div>
-
-      {selected && (
-        <Panel
-          title={`Bot inspector — ${selected}`}
-          right={
-            <button className="chip hover:opacity-80" style={{ cursor: 'pointer' }}
-              onClick={() => setSelected(null)}>close</button>
-          }
-        >
-          {(() => {
-            const b = bots.find((x) => x.bot_id === selected)
-            if (!b) {
-              return (
-                <p className="text-[0.75rem] dim">
-                  This node is a team rail (a whole group), not a single agent — open the Bot Roster
-                  to inspect its members.
-                </p>
-              )
-            }
-            return (
-              <div className="flex flex-wrap items-center gap-4">
-                <span className="text-3xl">{moodEmoji(b.mood)}</span>
-                <div>
-                  <p className="mono text-[0.9rem]">{b.name}</p>
-                  <p className="text-[0.7rem] dim">{b.role} · {b.group} · {b.rank}</p>
-                </div>
-                <div className="min-w-[12rem] flex-1">
-                  <Bar value={b.progress} color={b.color} glow />
-                  <p className="pt-1 text-[0.68rem] dim">{b.task || b.message || b.status}</p>
-                </div>
-                <div className="flex gap-4">
-                  <MiniStat label="score" value={String(Math.round(b.metrics?.score ?? 0))} />
-                  <MiniStat label="tasks" value={String(b.metrics?.tasks_done ?? 0)} />
-                  <MiniStat label="wins" value={String(b.metrics?.wins ?? 0)} tone="bull" />
-                  <MiniStat label="errors" value={String(b.metrics?.errors ?? 0)} tone="bear" />
-                  <MiniStat label="api/window" value={String(b.metrics?.api_spent_window ?? 0)} />
-                </div>
-                <button className="chip hover:opacity-80" style={{ cursor: 'pointer' }} onClick={() => goTo?.('bots')}>
-                  open dossier →
-                </button>
-              </div>
-            )
-          })()}
-        </Panel>
-      )}
-
-      {/* ── celebration tape ─────────────────────────────────────── */}
-      <Panel title="Latest closes" right={<Zap size={13} />}>
-        {(() => {
-          // logs are newest-first: take the most recent closes, not the oldest
-          const closes = (logs || []).filter((l) => /closed \(|reconciled/i.test(l.message)).slice(0, 6)
-          if (!closes.length) {
-            return <p className="text-[0.72rem] dim">no closed trades yet — the first win is celebrated here 🎉</p>
-          }
-          return (
-            <div className="flex flex-wrap gap-2">
-              {closes.map((l, i) => {
-                const win = /net \+\$/.test(l.message)
-                return (
-                  <span key={i} className="chip" style={{
-                    borderColor: win ? 'var(--color-bull)' : 'var(--color-bear)',
-                    color: win ? 'var(--color-bull)' : 'var(--color-bear)',
-                  }}>
-                    {win ? '🎉' : '💧'} {l.message.slice(0, 76)}
-                  </span>
-                )
-              })}
-            </div>
-          )
-        })()}
-      </Panel>
     </div>
   )
 }
 
-export default Dashboard
+function stageFor(group: string): string {
+  switch (group) {
+    case 'core': return 'connector'
+    case 'scanner': return 'scan'
+    case 'analyst': return 'analyze'
+    case 'execution': return 'execute'
+    case 'verify': return 'verify'
+    case 'monitor': return 'monitor'
+    default: return 'close'
+  }
+}
+
+export const _unused = { ArrowUpRight, ArrowDownRight, Zap }

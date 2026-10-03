@@ -37,6 +37,21 @@ attributes each call to the bot that made it.
 * The stop is **always clamped between entry and liquidation** (35 % safety buffer by default).
 * **Max 10 concurrent trades**, one position per symbol, 8 % margin each at 10× cross.
 
+### ROI trailing stop (never give a winner back)
+
+Once a position's **ROI reaches +25 %** (ROI = unrealised P&L ÷ margin, leverage-adjusted, exactly
+like Binance's ROI column) the trail arms and holds the stop **15 ROI-points behind the best price
+the position has seen** — so it starts at **+10 % ROI** and only ever ratchets *up*. It:
+
+* **moves the one STOP_MARKET order** the trade already has (cancel + replace, never a second order);
+* never loosens (a falling market can never pull the stop back down);
+* never sits on the losing side of the entry (break-even is the floor) and never past liquidation;
+* is kept a hair behind the mark (`0.05 %`) so it can never fire the instant it is placed;
+* throttles itself (≥ 1 ROI-point improvement, one request per monitor tick) to stay inside the API budget.
+
+Activation, distance and step are editable in **Settings → Risk / TP-SL**. A trailed exit is
+journalled with `close_reason = trail`, so the history shows exactly how much was protected.
+
 ---
 
 ## Quick start
@@ -110,7 +125,7 @@ backend/
       binance.py      USDT-M REST + websockets (orders, protection, user stream)
       sim.py          simulation exchange (offline demo & rehearsal)
       hub.py          MarketHub — candles, universe ranking, scanner allocation, health
-  tests/              79 tests covering every safety-critical rule
+  tests/              84 tests covering every safety-critical rule
 frontend/             React + TypeScript + Tailwind + three.js dashboard
 data/                 runtime state (git-ignored): config.json, journal, encrypted keys
 ```
@@ -143,8 +158,15 @@ the *Ledger check* strip; the maintenance loop logs a warning the moment the two
 apart beyond rounding, so a mis-booked trade cannot hide.
 
 The paper account is snapshotted on every equity tick *and* on shutdown, and a restart
-re-adopts open positions, protective orders and prices, so cancelling a demo run never
-loses a trade (`test_restart_loses_nothing_from_the_paper_account`).
+re-adopts open positions, protective orders, cumulative realized P&L and prices, so
+cancelling a demo run never loses a trade
+(`test_restart_loses_nothing_from_the_paper_account`).
+
+Fees are booked where they are paid: the **entry commission is charged to the trade
+when it opens** (`trades.entry_fee`), the exit leg when it closes. A position that is
+opened in one run and closed in the next therefore still reports its full cost — before
+this the released P&L silently missed the entry leg of every restarted trade
+(`test_entry_fee_is_booked_even_when_the_close_happens_after_a_restart`).
 
 ## Running offline
 
@@ -161,8 +183,13 @@ persisted, so restarts continue where they left off instead of resetting the dem
    position can never be trapped by a rate limit.
 3. If the stop cannot be placed on the exchange, the engine **flattens the position immediately**
    rather than holding it unprotected.
-4. Journal ↔ exchange reconciliation on every restart: phantom positions are marked closed.
-5. Emergency **FLATTEN ALL** button in the sidebar; `pause` stops new entries without disturbing
+4. Journal ↔ exchange reconciliation on every restart: phantom positions are marked closed, and
+   `GET /api/reconcile` compares the journal with the venue's own income ledger continuously.
+5. Fees are booked where they are paid (entry commission at open, exit commission at close), so a
+   trade that spans a restart still reports its full cost.
+6. The ROI trail can only ever **tighten** a stop; if the exchange rejects a trail update the engine
+   restores the previous stop, and if that fails too it flattens the position rather than leave it naked.
+7. Emergency **FLATTEN ALL** button in the sidebar; `pause` stops new entries without disturbing
    the monitors.
 
 ## Credits

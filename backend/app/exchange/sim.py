@@ -22,9 +22,9 @@ from typing import Any, Callable
 
 from ..bus import BUS
 from ..util import Candle, now_ms, tf_ms
-from .base import AccountSnapshot, ExchangeError, Fill, OrderResult, Position, SymbolFilter, Ticker
+from .base import (TAKER_FEE, AccountSnapshot, ExchangeError, Fill, OrderResult,
+                   Position, SymbolFilter, Ticker)
 
-TAKER_FEE = 0.0005      # Binance USDT-M taker (0.05%)
 MAKER_FEE = 0.0002
 FUNDING_INTERVAL_MS = 8 * 3600 * 1000
 
@@ -164,6 +164,7 @@ class SimExchange:
         self.orders: dict[str, SimOrder] = {}
         self.fills: list[Fill] = []
         self.realized_today: float = 0.0
+        self.realized_total: float = 0.0     # lifetime, survives restarts
         self.fees_paid: float = 0.0
         self.funding_net: float = 0.0
         self._order_seq = 1000
@@ -244,12 +245,16 @@ class SimExchange:
                 mark=price, funding_rate=0.0001, updated_at=now_ms())
 
     async def income_totals(self) -> dict:
-        """Everything this account has ever paid or earned (the cash ledger)."""
-        realized = sum(f.realized_pnl for f in self.fills
-                       if f.kind not in ("FUNDING_FEE",))
-        funding = sum(f.realized_pnl for f in self.fills if f.kind == "FUNDING_FEE")
-        return {"realized": realized, "fees": self.fees_paid, "funding": funding,
-                "fills": len(self.fills)}
+        """
+        Everything this account has ever paid or earned (the cash ledger).
+
+        The counters are cumulative and survive a restart — the fill list is a
+        rolling window, so it can never be the source of a lifetime total.
+        """
+        return {"realized": self.realized_total, "fees": self.fees_paid,
+                "funding": self.funding_net, "fills": len(self.fills),
+                "window_realized": sum(f.realized_pnl for f in self.fills
+                                       if f.kind != "FUNDING_FEE")}
 
     # ------------------------------------------------------- state continuity
     @staticmethod
@@ -265,6 +270,7 @@ class SimExchange:
             "virtual_now": self._virtual_now,
             "order_seq": self._order_seq,
             "realized_today": self.realized_today,
+            "realized_total": self.realized_total,
             "fees_paid": self.fees_paid,
             "funding_net": self.funding_net,
             "end_prices": {sym: s.price for sym, s in self.syms.items()},
@@ -309,6 +315,7 @@ class SimExchange:
         self.start_balance = float(state.get("start_balance", self.start_balance))
         self._order_seq = int(state.get("order_seq", self._order_seq))
         self.realized_today = float(state.get("realized_today", 0.0))
+        self.realized_total = float(state.get("realized_total", 0.0))
         self.fees_paid = float(state.get("fees_paid", 0.0))
         self.funding_net = float(state.get("funding_net", 0.0))
         for row in state.get("positions", []):
@@ -371,9 +378,12 @@ class SimExchange:
                 unrealized_pnl=pnl, notional=notional,
                 isolated_margin=p.entry * p.qty / max(1, p.leverage)))
         used = sum(p.entry * p.qty / max(1, p.leverage) for p in self.positions.values())
-        equity = self.balance + unreal
+        # Binance semantics: the wallet balance is *cash* (fees already netted,
+        # unrealised excluded); the margin balance is cash + unrealised.
+        cash = self.balance
+        equity = cash + unreal
         return AccountSnapshot(
-            total_wallet_balance=equity, total_margin_balance=equity,
+            total_wallet_balance=cash, total_margin_balance=equity,
             available_balance=max(0.0, equity - used),
             total_unrealized_pnl=unreal, total_initial_margin=used,
             total_maint_margin=used * 0.005, positions=positions,
@@ -441,6 +451,14 @@ class SimExchange:
                 o.status = "CANCELED"
                 self.orders.pop(oid, None)
 
+    async def cancel_order(self, symbol: str, order_id: str) -> None:
+        """Cancel one protective order (used when the trail ratchets the stop)."""
+        o = self.orders.get(str(order_id))
+        if o is None or o.symbol != symbol:
+            return
+        o.status = "CANCELED"
+        self.orders.pop(str(order_id), None)
+
     async def open_orders(self, symbol: str | None = None) -> list[dict]:
         return [{"orderId": o.order_id, "symbol": o.symbol, "type": o.type,
                  "stopPrice": o.stop_price, "status": o.status}
@@ -489,6 +507,7 @@ class SimExchange:
                     self.positions.pop(symbol, None)
         self.balance += realized - fee
         self.fees_paid += fee
+        self.realized_total += realized
         fill = Fill(symbol=symbol, side=side, qty=qty, price=price, commission=fee,
                     realized_pnl=realized, ts=now_ms(), order_id=oid,
                     trade_id=f"sim-{oid}", kind=kind)
@@ -597,13 +616,15 @@ class SimExchange:
                 self.orders.pop(oid, None)
                 continue
             candle = self.candles[o.symbol][-1]
-            # Where the order sits relative to the position decides how it fires:
-            # below entry on a long = stop (sell on the way down), above = target.
-            sits_above = o.stop_price >= pos.entry
-            if pos.side == "LONG":
-                upward = sits_above          # take-profit
-            else:
-                upward = sits_above          # stop-loss for a short
+            # Binance fires by *order type*, not by where the trigger sits:
+            #   STOP_MARKET          → closes on the way *against* the position
+            #   TAKE_PROFIT_MARKET   → closes on the way *with* it
+            # (a trailing stop sits above the entry of a long and is still a stop)
+            is_stop = o.type == "STOP_MARKET"
+            if pos.side == "LONG":           # the closing order is a SELL
+                upward = not is_stop         # stop triggers on the way down
+            else:                            # the closing order is a BUY
+                upward = is_stop             # stop triggers on the way up
             if upward:
                 crossed = candle.h >= o.stop_price or candle.o >= o.stop_price
                 gap = candle.o >= o.stop_price

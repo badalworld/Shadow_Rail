@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 
+# Binance USDT-M taker fee (0.05 %).  The simulator, the journal and the
+# entry-fee booking on every trade all have to agree on this number.
+TAKER_FEE = 0.0005
+
+
 class ExchangeError(RuntimeError):
     """Raised for any exchange REST/WS failure (message is UI-safe)."""
 
@@ -141,4 +146,6 @@ class Broker(Protocol):
                            reduce_only: bool = False) -> OrderResult: ...
     async def place_tp_sl(self, **kw) -> list[OrderResult]: ...
     async def cancel_all(self, symbol: str) -> None: ...
+
+    async def cancel_order(self, symbol: str, order_id: str) -> None: ...
     async def fills(self, start_ms: int | None = None) -> list[Fill]: ...

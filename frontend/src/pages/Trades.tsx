@@ -7,7 +7,7 @@ import { Bars, Donut, LineChart } from '../components/Charts'
 import type { Stats, Trade } from '../lib/types'
 
 export const Trades: React.FC = () => {
-  const { stats, equity, pushToast } = useStore()
+  const { stats, equity, logs, pushToast } = useStore()
   const [rows, setRows] = useState<Trade[]>(BOOT.closed_trades?.trades ?? [])
   const [total, setTotal] = useState(BOOT.closed_trades?.total ?? 0)
   const [limit, setLimit] = useState(100)
@@ -219,6 +219,33 @@ export const Trades: React.FC = () => {
             )}
           </tbody>
         </table>
+      </Panel>
+
+      {/* ── celebration tape: the newest closes, with the bots' reaction ── */}
+      <Panel title="Latest closes" right={<Chip color="var(--color-cyan)">newest first</Chip>}>
+        {(() => {
+          const closes = (logs || []).filter((l) => /closed \(/i.test(l.message)).slice(0, 8)
+          if (!closes.length) {
+            return <p className="text-[0.72rem] dim">
+              no closed trades yet — the first win is celebrated here 🎉
+            </p>
+          }
+          return (
+            <div className="flex flex-wrap gap-2">
+              {closes.map((l, i) => {
+                const win = /net \+\$/.test(l.message)
+                return (
+                  <span key={`${l.ts}-${i}`} className="glass-row px-2 py-1 text-[0.68rem]"
+                    style={{ borderColor: win
+                      ? 'color-mix(in oklab, var(--color-bull) 45%, transparent)'
+                      : 'color-mix(in oklab, var(--color-bear) 35%, transparent)' }}>
+                    {win ? '🎉' : '💧'} {l.message.slice(0, 130)}
+                  </span>
+                )
+              })}
+            </div>
+          )
+        })()}
       </Panel>
 
       {detail && (

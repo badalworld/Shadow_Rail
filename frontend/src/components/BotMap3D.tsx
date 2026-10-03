@@ -49,25 +49,25 @@ function layout(bots: Bot[]): Record<string, Node3D> {
   // core trio on the crown, scanners in an arc, analysts a wide row, etc.
   const core = (groups.core || [])
   place(core.filter((b) => b.bot_id === 'ceo-bot'), GROUP_Y.core + 2.6, 0)
-  place(core.filter((b) => b.bot_id !== 'ceo-bot'), GROUP_Y.core + 0.4, 12, -2.5)
+  place(core.filter((b) => b.bot_id !== 'ceo-bot'), GROUP_Y.core + 0.4, 16, -3.0)
 
   const right = (groups.monitor || [])
-  place(right, GROUP_Y.monitor - 1.2, 11, 9, 1.2)
+  place(right, GROUP_Y.monitor - 1.2, 15, 10.5, 1.4)
 
   const scanners = groups.scanner || []
   scanners.forEach((b, i) => {
     const t = scanners.length === 1 ? 0.5 : i / (scanners.length - 1)
-    const x = (t - 0.5) * 20
+    const x = (t - 0.5) * 26
     nodes[b.bot_id] = {
       bot: b,
-      pos: new THREE.Vector3(x, GROUP_Y.scanner - Math.cos((t - 0.5) * Math.PI) * 1.6, -1.5),
+      pos: new THREE.Vector3(x, GROUP_Y.scanner - Math.cos((t - 0.5) * Math.PI) * 1.6, -2.5),
     }
   })
 
-  place(groups.analyst || [], GROUP_Y.analyst, 26)
-  place(groups.execution || [], GROUP_Y.execution, 9, -1)
-  place(groups.verify || [], GROUP_Y.verify + 2.2, 4, 4)
-  place(groups.finance || [], GROUP_Y.finance - 1.0, 12, -10, 1.5)
+  place(groups.analyst || [], GROUP_Y.analyst, 34)
+  place(groups.execution || [], GROUP_Y.execution, 12, -1)
+  place(groups.verify || [], GROUP_Y.verify + 2.6, 5, 5)
+  place(groups.finance || [], GROUP_Y.finance - 1.0, 16, -12, 1.6)
   return nodes
 }
 
@@ -118,7 +118,9 @@ const NodeMesh: React.FC<{
     }
   })
 
-  const size = bot.bot_id === 'ceo-bot' ? 0.72 : bot.group === 'scanner' ? 0.42 : 0.5
+  const size = (bot.bot_id === 'ceo-bot' ? 1.05
+    : bot.group === 'scanner' ? 0.62
+    : bot.group === 'analyst' ? 0.72 : 0.8) * (reduced ? 1 : 1)
 
   return (
     <group>
@@ -143,7 +145,7 @@ const NodeMesh: React.FC<{
           </mesh>
         )}
       </mesh>
-      <Html position={[pos.x, pos.y - size - 0.55, pos.z]} center distanceFactor={22} zIndexRange={[10, 0]}>
+      <Html position={[pos.x, pos.y - size - 0.72, pos.z]} center distanceFactor={26} zIndexRange={[10, 0]}>
         <div
           onClick={() => onSelect(bot.bot_id)}
           className="cursor-pointer select-none whitespace-nowrap rounded-full px-2 py-[2px] text-center"
@@ -152,8 +154,9 @@ const NodeMesh: React.FC<{
             border: `1px solid ${color}66`,
             color: 'var(--sr-text)',
             fontFamily: 'var(--font-mono)',
-            fontSize: 9.5,
-            letterSpacing: '0.06em',
+            fontSize: 11.5,
+            fontWeight: 600,
+            letterSpacing: '0.05em',
           }}
         >
           <span style={{ color }}>{bot.name}</span>
@@ -175,7 +178,7 @@ const Rail: React.FC<{ from: THREE.Vector3; to: THREE.Vector3; color: string; ac
       return m
     }, [from, to])
     const curve = useMemo(() => new THREE.QuadraticBezierCurve3(from, mid, to), [from, mid, to])
-    const geo = useMemo(() => new THREE.TubeGeometry(curve, 42, active ? 0.032 : 0.018, 6, false),
+    const geo = useMemo(() => new THREE.TubeGeometry(curve, 48, active ? 0.05 : 0.03, 8, false),
       [curve, active])
     return (
       <mesh geometry={geo}>
@@ -211,6 +214,42 @@ const Pulse: React.FC<{ from: THREE.Vector3; to: THREE.Vector3; color: string }>
   )
 }
 
+/**
+ * The work zone: a dark platform the swarm actually works on — no grid, no
+ * chart, just the deck, its rim light and the lanes the rails run along.
+ */
+const WorkZone: React.FC<{ danger: boolean }> = ({ danger }) => {
+  const rim = useRef<THREE.Mesh>(null)
+  const accent = danger ? '#ff2d55' : '#22d3ee'
+  useFrame(({ clock }) => {
+    if (!rim.current) return
+    const m = rim.current.material as THREE.MeshBasicMaterial
+    m.opacity = 0.16 + Math.sin(clock.getElapsedTime() * 0.8) * 0.05
+  })
+  return (
+    <group position={[0, -9.2, 0]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <circleGeometry args={[34, 96]} />
+        <meshStandardMaterial color="#070b12" metalness={0.4} roughness={0.75} />
+      </mesh>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
+        <ringGeometry args={[10, 33.5, 96]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.04} />
+      </mesh>
+      <mesh ref={rim} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.04, 0]}>
+        <ringGeometry args={[33.2, 33.9, 96]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.2} />
+      </mesh>
+      {[-3.0, 1.5, 7.0].map((z) => (
+        <mesh key={z} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.05, z]}>
+          <planeGeometry args={[52, 0.14]} />
+          <meshBasicMaterial color={accent} transparent opacity={0.07} />
+        </mesh>
+      ))}
+    </group>
+  )
+}
+
 const Scene: React.FC<{
   bots: Bot[]
   links: Link[]
@@ -224,14 +263,14 @@ const Scene: React.FC<{
   const activePairs = useMemo(() => pulses.map((p) => ({ ...p })), [pulses])
   const { camera } = useThree()
   useEffect(() => {
-    camera.position.set(0, 9, 34)
+    camera.position.set(0, 11, 42)
   }, [camera])
 
   return (
     <>
-      <ambientLight intensity={0.55} />
-      <pointLight position={[12, 16, 12]} intensity={95} color={danger ? '#ff2d55' : '#22d3ee'} />
-      <pointLight position={[-14, -8, -10]} intensity={70} color={danger ? '#ff6b3d' : '#00e5a8'} />
+      <ambientLight intensity={0.62} />
+      <pointLight position={[12, 16, 12]} intensity={130} color={danger ? '#ff2d55' : '#22d3ee'} />
+      <pointLight position={[-14, -8, -10]} intensity={95} color={danger ? '#ff6b3d' : '#00e5a8'} />
       <fog attach="fog" args={[danger ? '#14030a' : '#05070c', 26, 68]} />
 
       {links.map((l, i) => {
@@ -257,9 +296,9 @@ const Scene: React.FC<{
           selected={false} onSelect={onSelect} />
       ))}
 
-      <gridHelper args={[70, 34, danger ? '#5a1020' : '#12e5ac22', '#ffffff10']} position={[0, -8.4, 0]} />
+      <WorkZone danger={danger} />
       <OrbitControls enablePan enableZoom enableRotate autoRotate={autoRotate} autoRotateSpeed={0.42}
-        minDistance={12} maxDistance={78} maxPolarAngle={Math.PI * 0.86} />
+        minDistance={16} maxDistance={95} maxPolarAngle={Math.PI * 0.88} />
     </>
   )
 }
@@ -277,7 +316,7 @@ export const BotMap3D: React.FC<{
     && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   return (
     <div className={`relative ${className}`}>
-      <Canvas dpr={[1, 1.75]} camera={{ position: [0, 9, 34], fov: 48 }}
+      <Canvas dpr={[1, 1.75]} camera={{ position: [0, 11, 42], fov: 46 }}
         gl={{ antialias: true, alpha: true }}>
         <Scene bots={bots} links={links} pulses={pulses} danger={danger}
           onSelect={onSelect} autoRotate={autoRotate} reduced={reduced} />
@@ -288,9 +327,13 @@ export const BotMap3D: React.FC<{
           {autoRotate ? '⟳ auto-orbit on' : '⟳ auto-orbit off'}
         </button>
       </div>
-      <div className="pointer-events-none absolute bottom-3 left-3 flex flex-wrap gap-2 text-[0.6rem]">
+      <div className="pointer-events-none absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1 text-[0.58rem] dim">
         {['core', 'scanner', 'analyst', 'execution', 'verify', 'monitor', 'finance'].map((g) => (
-          <span key={g} className="chip dim">{g}</span>
+          <span key={g} className="flex items-center gap-1">
+            <span className="inline-block h-1.5 w-1.5 rounded-full"
+              style={{ background: 'var(--sr-accent)', opacity: 0.7 }} />
+            {g}
+          </span>
         ))}
       </div>
     </div>

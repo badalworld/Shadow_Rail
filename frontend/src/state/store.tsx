@@ -67,6 +67,17 @@ type Boot = {
   curve?: { ts: number; cum: number }[]
   logs?: LogRow[]
 }
+/** The seven stations of the workflow rail — always all present, idle until touched. */
+export const WORKFLOW_STAGES: { key: string; label: string; bots: string }[] = [
+  { key: 'connector', label: 'Connector', bots: 'ORACLE' },
+  { key: 'scan', label: 'Scan ×5', bots: 'VEGA · NOVA · ORION · LYRA · ATLAS' },
+  { key: 'analyze', label: 'Analyse ×10', bots: 'EINSTEIN … BOHR' },
+  { key: 'execute', label: 'Execute ×2', bots: 'BOLT · TITAN' },
+  { key: 'verify', label: 'Verify', bots: 'ECHO' },
+  { key: 'monitor', label: 'Monitor ×4', bots: 'SENTINEL · WARDEN · WATCHMAN · GUARDIAN' },
+  { key: 'close', label: 'Journal', bots: 'LEDGER · BANKER · AEGIS' },
+]
+
 export const BOOT: Boot = (() => {
   const g = globalThis as unknown as { __SHADOW_RAIL_BOOT__?: Boot }
   return g.__SHADOW_RAIL_BOOT__ || {}

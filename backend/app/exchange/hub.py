@@ -512,6 +512,11 @@ class MarketHub:
     async def cancel_all(self, symbol: str) -> None:
         await self.exchange.cancel_all(symbol)
 
+    async def cancel_order(self, symbol: str, order_id: str) -> None:
+        if not order_id:
+            return
+        await self.exchange.cancel_order(symbol, order_id)
+
     async def open_orders(self, symbol: str | None = None) -> list[dict]:
         return await self.exchange.open_orders(symbol)
 

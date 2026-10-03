@@ -2,7 +2,8 @@ import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Activity, AlertOctagon, BarChart3, Bot as BotIcon, Info, LayoutDashboard, ListTree,
-  Pause, Play, Power, Radar, Settings as SettingsIcon, ShieldAlert, Square, Terminal, Zap,
+  MoreHorizontal, Pause, Play, Power, Radar, Settings as SettingsIcon, ShieldAlert,
+  Square, Terminal, Zap, Waves,
 } from 'lucide-react'
 import { useStore } from '../state/store'
 import { endpoints } from '../lib/api'
@@ -10,17 +11,32 @@ import { Chip, fmtMoney, fmtPct, statusColor } from './Glass'
 import { Toasts } from './Toasts'
 import { CelebrationOverlay } from './Celebration'
 
-export type PageKey = 'dashboard' | 'scan' | 'trades' | 'bots' | 'logs' | 'settings' | 'about'
+export type PageKey = 'dashboard' | 'positions' | 'scan' | 'trades' | 'bots' | 'logs'
+  | 'settings' | 'about'
 
 const NAV: { key: PageKey; label: string; icon: React.ReactNode; hint: string }[] = [
-  { key: 'dashboard', label: 'Command Deck', icon: <LayoutDashboard size={17} />, hint: 'Bot workflow + balance' },
-  { key: 'scan', label: 'Market Scan', icon: <Radar size={17} />, hint: 'Scanner bots × assets' },
-  { key: 'trades', label: 'Closed Trades', icon: <BarChart3 size={17} />, hint: 'History & P&L' },
-  { key: 'bots', label: 'Bot Roster', icon: <BotIcon size={17} />, hint: '29 agents' },
-  { key: 'logs', label: 'Workflow Log', icon: <Terminal size={17} />, hint: 'Full audit trail' },
-  { key: 'settings', label: 'Settings', icon: <SettingsIcon size={17} />, hint: 'Keys, risk, IP' },
-  { key: 'about', label: 'About', icon: <Info size={17} />, hint: 'Developer' },
+  { key: 'dashboard', label: 'Command Deck', icon: <LayoutDashboard size={19} />, hint: '3D bot work zone' },
+  { key: 'positions', label: 'Open Positions', icon: <Activity size={19} />, hint: 'Live trades + trail' },
+  { key: 'scan', label: 'Market Scan', icon: <Radar size={19} />, hint: 'Scanner bots × assets' },
+  { key: 'trades', label: 'Closed Trades', icon: <BarChart3 size={19} />, hint: 'History & P&L' },
+  { key: 'bots', label: 'Bot Roster', icon: <BotIcon size={19} />, hint: '29 agents + pipeline' },
+  { key: 'logs', label: 'Workflow Log', icon: <Terminal size={19} />, hint: 'Full audit trail' },
+  { key: 'settings', label: 'Settings', icon: <SettingsIcon size={19} />, hint: 'Keys, risk, IP' },
+  { key: 'about', label: 'About', icon: <Info size={19} />, hint: 'Developer' },
 ]
+
+/** Compact rail labels — the collapsed menu shows these instead of the full name. */
+const SHORT: Record<string, string> = {
+  'Command Deck': 'Deck',
+  'Open Positions': 'Open',
+  'Market Scan': 'Scan',
+  'Closed Trades': 'Trades',
+  'Bot Roster': 'Bots',
+  'Workflow Log': 'Logs',
+  'Settings': 'Setup',
+  'About': 'About',
+}
+const shortLabel = (label: string) => SHORT[label] ?? label.split(' ')[0]
 
 export const Layout: React.FC<{
   page: PageKey
@@ -29,6 +45,7 @@ export const Layout: React.FC<{
 }> = ({ page, setPage, children }) => {
   const { status, equity, api, sos, connected, pushToast } = useStore()
   const [busy, setBusy] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const critical = sos.active && sos.level === 'critical'
   const warning = sos.active && sos.level === 'warning'
   const mode = status?.mode || '—'
@@ -49,48 +66,118 @@ export const Layout: React.FC<{
   return (
     <div className="relative z-10 flex h-screen w-screen">
       {/* ───────────────────────── sidebar ───────────────────────── */}
-      <aside className="glass m-3 mr-0 flex w-[16.5rem] shrink-0 flex-col p-3">
-        <div className="flex items-center gap-3 px-1 py-2">
-          <img src="/logo.svg" alt="Shadow Rail" width={44} height={44} className="rounded-xl" />
-          <div className="min-w-0">
-            <div className="truncate text-[0.95rem] font-bold tracking-[0.14em] accent-text glow-text">
-              SHADOW RAIL
+      <aside
+        className="glass m-3 mr-0 flex shrink-0 flex-col overflow-hidden p-2.5 transition-[width] duration-300"
+        style={{ width: menuOpen ? '15.5rem' : '4.25rem' }}>
+
+        {/* header: logo (always) + ⋯ to expand the full menu */}
+        <div className="flex items-center gap-2">
+          <img src="/logo.svg" alt="Shadow Rail" width={38} height={38}
+            className="shrink-0 rounded-xl" />
+          {menuOpen && (
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[0.9rem] font-bold tracking-[0.14em] accent-text glow-text">
+                SHADOW RAIL
+              </div>
+              <div className="truncate text-[0.58rem] dim">AUTO TRADING ENGINE · v1.0</div>
             </div>
-            <div className="truncate text-[0.6rem] dim">AUTO TRADING ENGINE · v1.0</div>
-          </div>
+          )}
+          <button
+            onClick={() => setMenuOpen((v) => !v)}
+            title={menuOpen ? 'Collapse menu' : 'Open menu'}
+            aria-label={menuOpen ? 'Collapse menu' : 'Open menu'}
+            className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-xl transition-colors hover:opacity-80"
+            style={{
+              border: '1px solid var(--sr-border)',
+              background: menuOpen ? 'color-mix(in oklab, var(--sr-accent) 16%, transparent)' : 'transparent',
+              cursor: 'pointer',
+            }}>
+            <MoreHorizontal size={16} style={{ color: menuOpen ? 'var(--sr-accent)' : 'var(--sr-dim)' }} />
+          </button>
         </div>
 
-        <div className="mt-2 flex flex-wrap gap-1.5 px-1">
-          <Chip color={mode === 'live' ? 'var(--color-bull)' : mode === 'paper' ? 'var(--color-amber)' : 'var(--color-cyan)'}>
-            {mode === 'sim' ? '◈ simulation' : mode === 'live' ? '● live' : '◐ paper'}
-          </Chip>
-          <Chip color={transport === 'binance' ? 'var(--color-bull)' : 'var(--color-amber)'}>
-            {transport === 'binance' ? 'binance usdt-m' : 'sim feed'}
-          </Chip>
-        </div>
-
-        <nav className="mt-4 flex flex-col gap-1">
+        {/* short labels — the compact rail keeps the whole menu visible */}
+        <nav className="scroll-thin mt-3 flex flex-1 flex-col gap-1 overflow-y-auto overflow-x-hidden">
           {NAV.map((n) => {
             const active = page === n.key
             return (
-              <button key={n.key} onClick={() => setPage(n.key)}
-                className="group relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-all"
+              <button key={n.key} onClick={() => setPage(n.key)} title={n.label}
+                className="group relative flex items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition-all"
                 style={{
                   background: active ? 'color-mix(in oklab, var(--sr-accent) 14%, transparent)' : 'transparent',
                   border: `1px solid ${active ? 'color-mix(in oklab, var(--sr-accent) 40%, transparent)' : 'transparent'}`,
+                  cursor: 'pointer',
                 }}>
-                <span style={{ color: active ? 'var(--sr-accent)' : 'var(--sr-dim)' }}>{n.icon}</span>
-                <span className="flex-1">
-                  <span className="block text-[0.82rem] font-medium">{n.label}</span>
-                  <span className="block text-[0.6rem] dim">{n.hint}</span>
-                </span>
-                {active && <span className="h-6 w-[2px] rounded-full" style={{ background: 'var(--sr-accent)' }} />}
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center"
+                  style={{ color: active ? 'var(--sr-accent)' : 'var(--sr-dim)' }}>{n.icon}</span>
+                {menuOpen ? (
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[0.82rem] font-medium">{n.label}</span>
+                    <span className="block truncate text-[0.6rem] dim">{n.hint}</span>
+                  </span>
+                ) : (
+                  <span className="truncate text-[0.66rem] uppercase tracking-wider"
+                    style={{ color: active ? 'var(--sr-text)' : 'var(--sr-dim)' }}>
+                    {shortLabel(n.label)}
+                  </span>
+                )}
+                {active && <span className="absolute right-1 h-5 w-[2px] rounded-full"
+                  style={{ background: 'var(--sr-accent)' }} />}
               </button>
             )
           })}
         </nav>
 
-        <div className="mt-auto flex flex-col gap-2 px-1 pt-3">
+        <div className="flex flex-col gap-1.5 px-0.5 pb-1">
+          {menuOpen ? (
+            <>
+              <Chip color={mode === 'live' ? 'var(--color-bull)'
+                : mode === 'paper' ? 'var(--color-amber)' : 'var(--color-cyan)'}>
+                {mode === 'sim' ? '◈ simulation' : mode === 'live' ? '● live' : '◐ paper'}
+              </Chip>
+              <Chip color={transport === 'binance' ? 'var(--color-bull)' : 'var(--color-amber)'}>
+                {transport === 'binance' ? 'binance usdt-m' : 'sim feed'}
+              </Chip>
+            </>
+          ) : (
+            <span className="mx-auto inline-block h-2 w-2 rounded-full" title={
+              `${mode === 'sim' ? 'simulation' : mode} · ${transport === 'binance' ? 'binance' : 'sim feed'}`
+            } style={{
+              background: mode === 'live' ? 'var(--color-bull)'
+                : mode === 'paper' ? 'var(--color-amber)' : 'var(--color-cyan)',
+            }} />
+          )}
+        </div>
+
+        {!menuOpen && (
+          <div className="mt-auto flex flex-col items-center gap-1.5 pt-2">
+            <IconButton title={status?.paused ? 'Resume the engine' : 'Pause the engine'}
+              onClick={() => act(() => endpoints.enginePause(!status?.paused),
+                                 status?.paused ? 'Resumed' : 'Paused')} disabled={busy}>
+              {status?.paused ? <Play size={14} /> : <Pause size={14} />}
+            </IconButton>
+            <IconButton title="Stop the engine"
+              onClick={() => act(() => endpoints.engineStop(), 'Engine stopped')} disabled={busy}>
+              <Square size={14} />
+            </IconButton>
+            <IconButton title="Flatten every open position"
+              danger
+              onClick={() => {
+                if (confirm('Flatten EVERY open position at market? This is the panic button.')) {
+                  act(() => endpoints.emergencyClose(), 'Emergency flatten sent')
+                }
+              }} disabled={busy}>
+              <ShieldAlert size={14} />
+            </IconButton>
+            <span className="mt-1 inline-block h-1.5 w-1.5 rounded-full"
+              title={connected ? 'stream live' : 'polling'}
+              style={{ background: connected ? 'var(--color-bull)'
+                : status ? 'var(--color-amber)' : 'var(--sr-dim)' }} />
+          </div>
+        )}
+
+        <div className="mt-auto flex flex-col gap-2 px-1 pt-2"
+          style={{ display: menuOpen ? undefined : 'none' }}>
           <div className="glass-solid p-2.5">
             <div className="mb-1.5 flex items-center justify-between text-[0.6rem] dim">
               <span>ENGINE</span>
@@ -242,3 +329,21 @@ const HeaderStat: React.FC<{
     </div>
   )
 }
+
+const IconButton: React.FC<{
+  title: string
+  onClick: () => void
+  disabled?: boolean
+  danger?: boolean
+  children: React.ReactNode
+}> = ({ title, onClick, disabled, danger, children }) => (
+  <button title={title} aria-label={title} onClick={onClick} disabled={disabled}
+    className="flex h-8 w-8 items-center justify-center rounded-xl transition-opacity hover:opacity-80"
+    style={{
+      border: `1px solid ${danger ? 'color-mix(in oklab, var(--color-bear) 45%, transparent)' : 'var(--sr-border)'}`,
+      color: danger ? 'var(--color-bear)' : 'var(--sr-dim)',
+      cursor: 'pointer',
+    }}>
+    {children}
+  </button>
+)

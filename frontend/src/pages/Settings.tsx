@@ -358,6 +358,41 @@ export const Settings: React.FC = () => {
                   </div>
                 )}
 
+                <div className="glass-solid flex flex-col gap-3 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="text-[0.8rem] font-semibold">ROI trailing stop</div>
+                      <div className="text-[0.66rem] dim">
+                        Once a position earns {Number(cfg.risk.trail_activation_roi_pct ?? 25)}% ROI the
+                        stop trails {Number(cfg.risk.trail_distance_roi_pct ?? 15)} ROI-points behind the
+                        peak — so it starts at{' '}
+                        {Math.max(0, Number(cfg.risk.trail_activation_roi_pct ?? 25)
+                          - Number(cfg.risk.trail_distance_roi_pct ?? 15))}% ROI and only ratchets up.
+                        It <em>moves</em> the one stop that already exists, never adds a second.
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-[0.72rem]">
+                      <input type="checkbox" checked={!!cfg.risk.trail_roi_enabled}
+                        onChange={(e) => patch('risk', 'trail_roi_enabled', e.target.checked)} />
+                      enabled
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+                    <Num label="Activate at ROI %" value={cfg.risk.trail_activation_roi_pct ?? 25}
+                      step={1} onChange={(v) => patch('risk', 'trail_activation_roi_pct', v)} />
+                    <Num label="Trail distance (ROI pts)" value={cfg.risk.trail_distance_roi_pct ?? 15}
+                      step={1} onChange={(v) => patch('risk', 'trail_distance_roi_pct', v)} />
+                    <Num label="Min re-place step (ROI pts)" value={cfg.risk.trail_min_step_roi_pct ?? 1}
+                      step={0.5} onChange={(v) => patch('risk', 'trail_min_step_roi_pct', v)} />
+                  </div>
+                  <div className="mono text-[0.66rem] dim">
+                    ROI is measured on margin (leverage-adjusted, like Binance): at{' '}
+                    {cfg.risk.leverage}× a {((Number(cfg.risk.trail_activation_roi_pct ?? 25)
+                      / Math.max(1, Number(cfg.risk.leverage) || 1))).toFixed(2)}% price move arms the trail.
+                    The stop can never sit past the liquidation price or below break-even.
+                  </div>
+                </div>
+
                 <div className="glass-solid p-3 text-[0.68rem]">
                   <div className="mb-1 text-[0.6rem] uppercase tracking-wider dim">active system (live)</div>
                   <div className="accent-text">{activeSystem?.risk_mode?.replace(/_/g, ' ')}</div>

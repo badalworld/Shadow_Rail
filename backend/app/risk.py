@@ -64,6 +64,68 @@ def estimate_liquidation(entry: float, side: str, leverage: int,
     return entry * (1.0 + 1.0 / lev - mmr)
 
 
+def roi_points(entry: float, price: float, qty: float, margin: float,
+               side: str) -> float:
+    """
+    Position ROI in *points* (1 point = 1 % of the margin committed).
+
+    This is the number Binance shows in the ROI % column: the unrealised P&L of
+    the position divided by its margin.  At 10x a 2.5 % price move is +25 ROI.
+    """
+    if margin <= 0 or qty <= 0:
+        return 0.0
+    move = (price - entry) * (1.0 if side == "LONG" else -1.0)
+    return move * qty / margin * 100.0
+
+
+def roi_price_step(margin: float, qty: float) -> float:
+    """Price move that equals exactly one ROI point (1 % of the margin)."""
+    if qty <= 0:
+        return 0.0
+    return margin / (100.0 * qty)
+
+
+def trail_stop_price(*, entry: float, side: str, peak_price: float, mark: float,
+                     qty: float, margin: float, prev_stop: float,
+                     activation_roi: float, distance_roi: float,
+                     mark_gap_pct: float = 0.0) -> tuple[float, bool]:
+    """
+    The ROI trailing stop (user rule: arm at +25 % ROI, trail 15 ROI behind the
+    peak — i.e. the stop starts at +10 % ROI and only ever ratchets *up*).
+
+    Returns ``(stop_price, armed)``.  ``stop_price`` is ``prev_stop`` until the
+    peak ROI reaches the activation threshold, and is never:
+      * lower than ``prev_stop``                     (monotonic ratchet)
+      * closer to the market than ``mark_gap_pct``   (never fires on placement)
+      * on the losing side of the entry              (a trail locks profit)
+      * beyond the liquidation price                 (hard board rule)
+    """
+    if qty <= 0 or margin <= 0:
+        return prev_stop, False
+    peak_roi = roi_points(entry, peak_price, qty, margin, side)
+    if peak_roi < activation_roi:
+        return prev_stop, False
+    step = roi_price_step(margin, qty)
+    target_roi = max(activation_roi - distance_roi,
+                     peak_roi - distance_roi)
+    floor_roi = max(0.0, target_roi)          # never past break-even
+    if side == "LONG":
+        stop = entry + floor_roi * step
+        limit = mark * (1.0 - max(0.0, mark_gap_pct) / 100.0)
+        stop = min(stop, limit)
+        stop = max(stop, prev_stop)
+        if stop < entry:                 # break-even is allowed, losses are not
+            return prev_stop, False
+    else:
+        stop = entry - floor_roi * step
+        limit = mark * (1.0 + max(0.0, mark_gap_pct) / 100.0)
+        stop = max(stop, limit)
+        stop = min(stop, prev_stop)
+        if stop > entry:                 # break-even is allowed, losses are not
+            return prev_stop, False
+    return stop, True
+
+
 def stop_loss_price(entry: float, side: str, atr: float, sl_mult: float) -> float:
     if side.upper() in ("LONG", "BUY"):
         return entry - sl_mult * atr

@@ -64,6 +64,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { StoreProvider } from './state/store'
 import { Layout } from './components/Layout'
 import { Dashboard } from './pages/Dashboard'
+import { Positions } from './pages/Positions'
 import { Scan } from './pages/Scan'
 import { Trades } from './pages/Trades'
 import { Bots } from './pages/Bots'
@@ -73,6 +74,7 @@ import { About } from './pages/About'
 
 const PAGES: [string, React.ComponentType<any>, string][] = [
   ['Dashboard', Dashboard, 'dashboard'],
+  ['Positions', Positions, 'positions'],
   ['Scan', Scan, 'scan'],
   ['Trades', Trades, 'trades'],
   ['Bots', Bots, 'bots'],

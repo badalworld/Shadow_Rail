@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { Layout, type PageKey } from './components/Layout'
 import { Dashboard } from './pages/Dashboard'
+import { Positions } from './pages/Positions'
 import { Scan } from './pages/Scan'
 import { Trades } from './pages/Trades'
 import { Bots } from './pages/Bots'
@@ -24,6 +25,7 @@ export const App: React.FC = () => {
 
       <Layout page={page} setPage={setPage}>
         {page === 'dashboard' && <Dashboard goTo={setPage} />}
+        {page === 'positions' && <Positions />}
         {page === 'scan' && <Scan />}
         {page === 'trades' && <Trades />}
         {page === 'bots' && <Bots />}

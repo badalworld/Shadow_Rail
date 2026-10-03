@@ -137,6 +137,21 @@ class RiskSettings(BaseModel):
     custom_tp_enabled: bool = True
 
     use_reverse_signal_exit: bool = True
+
+    # ── ROI trailing stop ────────────────────────────────────────────────
+    # ROI is measured on *margin* (leverage-adjusted), exactly like the
+    # "ROI %" column on Binance:  roi = unrealised P&L / margin * 100.
+    # The trail only ever *tightens* the single stop the trade already has —
+    # it never adds a second order and it can never sit past liquidation.
+    trail_roi_enabled: bool = True
+    trail_activation_roi_pct: float = 25.0   # arm the trail at +25 % ROI …
+    trail_distance_roi_pct: float = 15.0     # … keeping the stop 15 ROI-pts
+                                             #    behind the peak (⇒ +10 % ROI)
+    trail_min_step_roi_pct: float = 1.0      # only re-place the order when the
+                                             #    stop improves by this much
+    trail_mark_gap_pct: float = 0.05         # keep the trigger this far behind
+                                             #    the current price (no instant fire)
+
     leverage: int = 10
     margin_type: Literal["CROSS", "ISOLATED"] = "CROSS"
     size_pct_per_trade: float = 8.0      # % of equity used as margin
@@ -147,6 +162,11 @@ class RiskSettings(BaseModel):
     max_stop_distance_pct: float = 8.0   # sanity cap (reject beyond this)
     daily_drawdown_stop_pct: float = 0.0  # 0 = disabled
     min_notional_override: float = 0.0
+
+    def trail(self) -> tuple[bool, float, float, float]:
+        """(enabled, activation ROI %, distance ROI pts, min step ROI pts)."""
+        return (self.trail_roi_enabled, self.trail_activation_roi_pct,
+                self.trail_distance_roi_pct, self.trail_min_step_roi_pct)
 
     def active_tp_sl(self) -> tuple[float, float, bool]:
         """Returns (sl_atr_mult, tp_atr_mult, tp_enabled) for the ONE active system."""
@@ -335,6 +355,10 @@ class ConfigStore:
             "tp_atr_mult": self.cfg.risk.active_tp_sl()[1],
             "tp_enabled": self.cfg.risk.active_tp_sl()[2],
             "reverse_signal_exit": self.cfg.risk.use_reverse_signal_exit,
+            # the trail only *moves* the single stop this system already placed
+            "trail_roi_enabled": self.cfg.risk.trail_roi_enabled,
+            "trail_activation_roi_pct": self.cfg.risk.trail_activation_roi_pct,
+            "trail_distance_roi_pct": self.cfg.risk.trail_distance_roi_pct,
         }
         return data
 
