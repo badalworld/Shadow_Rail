@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import {
-  Activity, ArrowDownRight, ArrowUpRight, Coins, Gauge, Lock, Receipt, TrendingUp, Users, Zap,
+  Activity, Coins, Gauge, Lock, Receipt, TrendingUp, Users,
 } from 'lucide-react'
 import { Panel, Stat, Chip, Bar, moodEmoji, fmtMoney, fmtNum, fmtPct } from '../components/Glass'
 import { BotMap3D } from '../components/BotMap3D'
@@ -226,5 +226,3 @@ function stageFor(group: string): string {
     default: return 'close'
   }
 }
-
-export const _unused = { ArrowUpRight, ArrowDownRight, Zap }

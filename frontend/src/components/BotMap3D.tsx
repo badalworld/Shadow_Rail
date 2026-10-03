@@ -296,6 +296,21 @@ const Scene: React.FC<{
           selected={false} onSelect={onSelect} />
       ))}
 
+      {/* lane markers: the work zone is organised in named bays */}
+      {Object.keys(GROUP_Y).map((g) => {
+        const c = teamCentroid(nodes, g)
+        if (!c.x && !c.z) return null
+        return (
+          <Html key={`lane-${g}`} position={[c.x, -9.0, c.z]} center zIndexRange={[5, 0]}>
+            <span style={{
+              fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.22em',
+              textTransform: 'uppercase', color: danger ? '#ff8fa3' : '#7ef7d1',
+              opacity: 0.5, whiteSpace: 'nowrap',
+            }}>{g} bay</span>
+          </Html>
+        )
+      })}
+
       <WorkZone danger={danger} />
       <OrbitControls enablePan enableZoom enableRotate autoRotate={autoRotate} autoRotateSpeed={0.42}
         minDistance={16} maxDistance={95} maxPolarAngle={Math.PI * 0.88} />
