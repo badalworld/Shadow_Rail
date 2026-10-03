@@ -542,12 +542,16 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 # ═════════════════════════════════════════════════════════ static dashboard
 if WEB_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(WEB_DIR / "assets")), name="assets")
+    # Licensed Renderpeople scans (and any other drop-in art) live here: the
+    # route only exists when the folder does, so nothing 404s on a clean build.
+    if (WEB_DIR / "models").exists():
+        app.mount("/models", StaticFiles(directory=str(WEB_DIR / "models")), name="models")
 
     @app.middleware("http")
     async def _asset_cache_headers(request: Request, call_next):     # noqa: ANN001
-        """Hashed bundles are immutable; the shell itself is never cached."""
+        """Hashed bundles and static art are immutable; the shell is never cached."""
         response = await call_next(request)
-        if request.url.path.startswith("/assets/"):
+        if request.url.path.startswith(("/assets/", "/models/")):
             response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
 

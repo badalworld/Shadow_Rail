@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc -b --noCheck && vite build",
     "preview": "vite preview",
-    "ui:check": "node scripts/ui-spec-check.mjs"
+    "ui:check": "node scripts/ui-spec-check.mjs",
+    "hq:audit": "node scripts/hq-audit.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^9.114.3",

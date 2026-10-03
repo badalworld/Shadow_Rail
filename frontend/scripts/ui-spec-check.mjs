@@ -26,11 +26,19 @@ const REQUIRED = [
   ['ROI trail badge on the main cards', 'trailing'],
   ['ledger check lives off the main page', 'Ledger check'],
   ['work-zone bays labelled', 'bay'],
+  ['3D headquarters is the work zone', 'headquarters'],
+  ['every station has a labelled bay', 'Verification Gate'],
+  ['agent card exists for a clicked body', 'agent card'],
+  ['human reference credited', 'Renderpeople'],
+  ['render quality toggle', 'cinematic'],
+  ['licensed-scan drop-in slot', '/models/people'],
+  ['compact swarm map kept as a view', 'swarm map'],
 ]
 
 const FORBIDDEN = [
   ['no equities chart on the main page', 'equityCurve(400)'],
   ['no 3D grid/graph floor', 'gridHelper'],
+  ['no bundled Renderpeople assets', 'cdn.renderpeople'],
 ]
 
 // structural: the *rendered* Command Deck must not carry the panels that were
@@ -40,6 +48,8 @@ const RENDERED_OK = [
   ['rendered deck: 3D work zone', 'Bot Work Zone'],
   ['rendered deck: starting balance', 'Starting Balance'],
   ['rendered deck: win rate', 'Win Rate'],
+  ['rendered deck: headquarters work zone', 'headquarters'],
+  ['rendered deck: fees paid card', 'Fees Paid'],
 ]
 const RENDERED_FORBIDDEN = [
   ['rendered deck: pipeline rail moved to Bot Roster', 'Pipeline stages'],

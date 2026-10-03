@@ -99,6 +99,9 @@ cd frontend && npm run dev
 # prove the dashboard the server is serving matches the agreed UI
 cd frontend && npm run ui:check
 
+# check the 3D headquarters plan against the live roster (seats, furniture, walls)
+cd frontend && npm run hq:audit
+
 # rebuild the dashboard bundle FastAPI serves
 cd frontend && npm run build
 ```
@@ -128,8 +131,13 @@ backend/
       binance.py      USDT-M REST + websockets (orders, protection, user stream)
       sim.py          simulation exchange (offline demo & rehearsal)
       hub.py          MarketHub — candles, universe ranking, scanner allocation, health
-  tests/              84 tests covering every safety-critical rule
+  tests/              98 tests covering every safety-critical rule
 frontend/             React + TypeScript + Tailwind + three.js dashboard
+  src/components/hq/  the 3D headquarters: layout (floor plan + cast), furniture,
+                      Human (the rigged body), HQ (room, camera, live boards),
+                      HQPanel (agent card), DetailToggle, RenderpeopleCredits
+  public/models/people/  drop-in slot for licensed Renderpeople scans (empty by default)
+  scripts/hq-audit.mjs   asserts the floor plan against the live roster
 data/                 runtime state (git-ignored): config.json, journal, encrypted keys
 ```
 
@@ -197,8 +205,8 @@ persisted, so restarts continue where they left off instead of resetting the dem
 
 ## The Command Deck
 
-The main page is deliberately one thing: the **3D bot work zone** (the whole swarm working on a
-lit deck — bodies, visors, contact shadows, pulses travelling the rails) and, underneath it, the six
+The main page is deliberately one thing: the **3D AI Trading Bot Headquarters** — a trading floor
+you can fly around, where all 29 agents have a body, a desk and a job — and, underneath it, the six
 numbers that matter: **starting balance · current equity · opened positions · realised P&L ·
 fees paid · win rate**.  Everything else lives in the menu:
 
@@ -215,6 +223,58 @@ fees paid · win rate**.  Everything else lives in the menu:
 The sidebar starts **collapsed** — logo plus short labels — and the **⋯ button at the top** expands
 the full menu with the engine controls.
 
+### The headquarters (the 3D work zone)
+
+A 48 × 30 m floor with a 10 m ceiling.  Each bay of the floor is a station of the engine's
+workflow, and the agents in it are the bots that own that stage:
+
+| Bay | Who is there | What it is |
+|---|---|---|
+| Command Deck (dais) | CEO · Connector · API Guard | the CEO's podium and the two bridge consoles; the maintenance bot walks a patrol loop |
+| Scanner Bay (west wall) | VEGA … ATLAS | five desks, one per volatility group, each with a live board |
+| Analyst Wing | the ten Market Analysts | two rows of desks facing the big board |
+| Execution Pods | BOLT · TITAN | curved consoles under the hanging execution board |
+| Verification Gate | ECHO | the arch every execution walks through before it counts |
+| Monitor Wall (east wall) | the four trade monitors | a four-panel video wall, one desk each |
+| Vault & Ledger | LEDGER · BANKER · AEGIS · RISK | a vault door with the equity hologram floating over it |
+
+* **Click anything** — an agent, a screen, a floor ring, a station chip — to fly the camera there.
+  Clicking an agent opens its card (live task and progress, mood, score, per-bot stats, its own log
+  tail, *locate* and *promote* buttons) straight from `/api/bots/{id}`.
+* **Rail pulses**: when the engine hands work from one team to the next, the rail between those two
+  bays lights up and a pulse travels it, and the two agents it touched react.
+* **Mood is the bot status** — the floor celebrates a win (sparkles over the winning agent) and
+  slumps after a stop, exactly like the roster says.
+* **The big board** and the four monitor panels cycle *overview · workflow rail · risk governor ·
+  equity manager*; they are drawn from the same numbers as the six cards, so nothing on the wall can
+  disagree with the ledger.  Click a board to change its view.
+* **Rendering quality** — *cinema / balanced / speed*, remembered per browser under
+  `shadow-rail.hq.detail`; *speed* drops reflections, shadows and geometry detail for older
+  laptops.  The node-graph view from earlier builds is still there as the **swarm map** toggle.
+
+### Renderpeople integration
+
+The bodies are modelled on the [Renderpeople](https://renderpeople.com/3d-people) office-people
+catalogue — sitting, typing, standing and walking poses, business and smart-casual clothing, and the
+full range of builds, ages and ethnicities.  Those scans are **paid, licensed assets**, so none of
+their geometry is redistributed here: `buildLook()` derives a deterministic body from the agent id
+instead, which is why the same agent always looks the same (and why all 29 of them differ).
+
+If you own a licence, drop the scans in and the room uses them instead:
+
+```bash
+mkdir -p frontend/public/models/people
+cp ceo-bot.glb frontend/public/models/people/          # one file per bot_id
+VITE_HQ_SCANS=on npm run build
+```
+
+Each GLB is cloned per agent, normalised to that agent's height, and falls back to the procedural
+body if the file is missing or broken (one error boundary per agent, so a single bad scan can never
+take the floor down).  FastAPI serves `/models/*` with `Cache-Control: immutable`
+(`_asset_cache_headers` in `backend/app/api.py`) and only mounts the route when the folder exists —
+a missing scan 404s instead of silently returning the SPA shell.  Nothing is ever fetched from
+renderpeople.com at runtime; the dashboard has no external network dependency.
+
 ### Never see a stale dashboard again
 
 The shell is served `Cache-Control: no-store` and every asset URL is stamped with the build time, so
@@ -226,6 +286,8 @@ any rebuild.
 
 * Indicator: **Ghost Candle with Shadow Rail** © ChartTrader-X (MPL-2.0) —
   <https://www.tradingview.com/script/AY5Gz97v-Ghost-Candle-with-Shadow-Rail-Px/>
+* Human reference for the headquarters cast: **Renderpeople** office-people catalogue —
+  <https://renderpeople.com/3d-people> (taxonomy only; no scans redistributed)
 * Engine & dashboard: **badalworld**
 
 ⚠️ **Trading futures with leverage can lose money faster than you can earn it.** Start on
