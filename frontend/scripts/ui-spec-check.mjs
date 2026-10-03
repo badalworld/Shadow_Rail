@@ -18,7 +18,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const API = process.argv[2] || process.env.SMOKE_API || 'http://localhost:8080'
 
 const REQUIRED = [
-  ['Command Deck is the 3D bot work zone', 'Bot Work Zone'],
+  ['Command Deck is the 3D bot work zone', 'headquarters'],
   ['starting balance card', 'Starting Balance'],
   ['current equity card', 'Current Equity'],
   ['opened positions card', 'Opened Positions'],
@@ -27,7 +27,7 @@ const REQUIRED = [
   ['win rate card', 'Win Rate'],
   ['three-dot menu expander', 'Collapse menu'],
   ['Open Positions in the menu', 'Open Positions'],
-  ['ROI trail badge on the main cards', 'trailing'],
+  ['ROI trail surfaced in the menu pages', 'trail_active'],
   ['ledger check lives off the main page', 'Ledger check'],
   ['work-zone bays labelled', 'bay'],
   ['3D headquarters is the work zone', 'headquarters'],
@@ -50,7 +50,6 @@ const FORBIDDEN = [
 // moved into the menu, and must carry the six cards.  Checked against the SSR
 // harness, so it is the real markup, not a guess about the bundle.
 const RENDERED_OK = [
-  ['rendered deck: 3D work zone', 'Bot Work Zone'],
   ['rendered deck: headquarters work zone', 'headquarters'],
 ]
 // the deck is nothing but the office — every number moved into the menu
@@ -117,7 +116,9 @@ const SOURCE_RULES = () => {
   const human = readFileSync(resolve(here, '../src/components/hq/Human.tsx'), 'utf8')
   const bots = readFileSync(resolve(here, '../../backend/app/bots.py'), 'utf8')
   const office = readFileSync(resolve(here, '../src/pages/Bots.tsx'), 'utf8')
+  const dash = readFileSync(resolve(here, '../src/pages/Dashboard.tsx'), 'utf8')
   /* the seven bays, by the short department name the floor draws */
+  const engine = readFileSync(resolve(here, '../../backend/app/engine.py'), 'utf8')
   const bays = ['COMMAND', 'SCAN', 'ANALYST', 'EXECUTE', 'VERIFY', 'MONITOR', 'FINANCE']
   /* the floor carries an architectural grid — fixed dimensions, never fed by
      trade or equity data (the rejected "down graph on the floor") */
@@ -135,6 +136,11 @@ const SOURCE_RULES = () => {
     // ── the top notification is gone for good ──────────────────────────────
     ['no banner is raised over the dashboard',
       !/CelebrationOverlay|setCelebration/.test(layout + src)],
+    ['a keyless simulator raises no banner',
+      /const notice = !sos.active && sos.level === 'notice'/.test(layout)
+      && /sos.active && \(/.test(layout.slice(layout.indexOf('AnimatePresence')))],
+    ['keyless connector reports a notice, never a warning',
+      /return \("notice", problems or \["no Binance API keys stored/.test(engine)],
     ['win/loss reaction lives on the 3D floor',
       /Sparkles/.test(hq) && /mood === 'sad'|set_mood|'sad'/.test(hq)],
     // ── the 3D floor states the department, not its paperwork ─────────────
@@ -147,6 +153,8 @@ const SOURCE_RULES = () => {
       !/· \{bot\.status\}/.test(human)],
     ['no instruction text on the 3D floor',
       !/drag to orbit/.test(hq)],
+    ['the 3D floor carries no counters or ticker',
+      !/bar closes in|swarm activity|\{working\} working|\{trailing\} trailing/.test(dash)],
     ['bay boards carry a headline, not a data dump',
       /rows=\{\[\['assets'[^\]]*\]\]\}/.test(hq)
       && /rows=\{\[\['open'[^\]]*\]\]\}/.test(hq)

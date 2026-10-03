@@ -214,7 +214,7 @@ banner stays up for as long as the connection is broken.  Everything lives in th
 
 | Page | What is there |
 |---|---|
-| Command Deck | the 3D headquarters only — short department labels, head-only name badges, click agents, fly the floor |
+| Command Deck | the 3D headquarters only — short department labels, head-only name badges, no ticker/counters, click agents, fly the floor |
 | Account | starting balance · current equity · opened positions · realised P&L · fees paid · win rate, the equity sheet, growth, costs and the ledger check |
 | Open Positions | live trades, per-position ROI / peak ROI, the ROI trail lock, ledger check |
 | Market Scan | scanner bots × assets |
@@ -263,7 +263,8 @@ workflow, and the agents in it are the bots that own that stage:
   suits and a `#2d3a4d` floor grid, with a ledge and truss so the room has edges instead of an
   empty sky.  Station cameras were re-aimed to ~20 m so a zone fits the frame whole.  The floor grid
   is architectural only — `ui:check` asserts it is never fed trade or equity data.
-* **Nothing is raised over the floor** — there is no top notification banner.  A win or a loss is
+* **Nothing is raised over the floor** — there is no top notification banner, and no ticker or
+  counter row above the 3D view either (the deck is the work zone, full height).  A win or a loss is
   stated on the floor itself (the swarm's mood, the sparkles over the winning agent, the board),
   and the toasts that remain expire in exactly `NOTIFY_MS = 3000` ms (see
   `frontend/src/state/store.tsx`).  `npm run ui:check` asserts both rules against the source,
@@ -274,6 +275,13 @@ workflow, and the agents in it are the bots that own that stage:
   (`headsFor()` in `hq/layout.ts` picks the highest rank, then the best score).  Any other agent
   still responds to a click and opens its card; the wall boards carry three headline rows each, so
   the 3D view reads as an office rather than a spreadsheet.
+
+**Connector severity** — `_connector_verdict()` classifies a probe into four levels, and only the
+last two can raise anything over the dashboard: `none` (green, verified link), **`notice`** (no API
+keys stored yet, so the simulator is doing the work — the header shows a small `◈ simulator` chip,
+nothing is raised, nothing is paused), `warning` (a *configured* link is degraded — amber banner)
+and `critical` (a configured/real link is down — the ☠️ SOS siren, the dashboard turns red and
+trading halts).  A keyless install therefore never looks broken, and a real outage still cannot hide.
 
 The menu follows the same rule: collapsed, the rail is **symbols only**; the `⋯` button at the top
 expands it into the full labels + hints.  No auto-promotion popup, no banner, no stray text on the

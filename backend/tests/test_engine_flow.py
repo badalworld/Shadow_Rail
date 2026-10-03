@@ -432,7 +432,9 @@ async def _set_price_engine(hub) -> None:
 
 async def test_connector_stays_amber_until_keys_are_provided(db, store):
     """A fresh install must not scream ☠️ SOS just because no keys exist yet —
-    but a *configured* link that fails must."""
+    and it must not raise an amber banner either: with nothing to connect to,
+    the connector reports a quiet `notice` and the floor stays clean.  A
+    *configured* link that fails still raises the siren."""
     eng = await make_engine(store)
     store.cfg.binance.mode = "live"
     store.save()
@@ -440,8 +442,12 @@ async def test_connector_stays_amber_until_keys_are_provided(db, store):
     healthy_sim = {"connected": True, "problems": [], "transport": "sim"}
     eng.hub.last_error = "No Binance API credentials configured"
     level, problems = eng._connector_verdict(healthy_sim)
-    assert level == "warning", level
-    assert any("credentials" in p.lower() for p in problems)
+    assert level == "notice", level
+    assert any("credentials" in p.lower() or "keys" in p.lower() for p in problems)
+
+    # …and the loop never raises anything over the dashboard for that state
+    eng._note_connector_notice(problems)
+    assert eng.sos["active"] is False and eng.sos["level"] == "notice"
 
     # keys stored + the Binance link fell back to the simulator → the siren
     store.update({"binance": {"api_key": "KEY123", "api_secret": "SECRET123"}})
@@ -459,11 +465,20 @@ async def test_connector_stays_amber_until_keys_are_provided(db, store):
 
 
 async def test_sos_siren_is_reserved_for_a_configured_link(db, store):
-    """sim.transport probe that never connected, with no keys, is a warning."""
+    """A sim.transport probe that never connected, with no keys, is a notice:
+    there is nothing to connect to, so nothing is raised over the dashboard."""
     eng = await make_engine(store)
     store.cfg.binance.mode = "live"
     store.cfg.engine.simulate_when_offline = True
     store.save()
     eng.hub.last_error = "No Binance API credentials configured"
     level, _ = eng._connector_verdict({"connected": False, "problems": [], "transport": "sim"})
-    assert level == "warning"
+    assert level == "notice"
+    eng._note_connector_notice(["simulator active — no keys stored"])
+    assert eng.sos["active"] is False
+    assert eng.paused is False, "a keyless simulator must keep trading the paper book"
+
+    # once keys are stored, a dead link *is* a problem and the siren returns
+    store.update({"binance": {"api_key": "KEY123", "api_secret": "SECRET123"}})
+    level, _ = eng._connector_verdict({"connected": False, "problems": [], "transport": "sim"})
+    assert level == "critical"

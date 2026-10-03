@@ -35,6 +35,9 @@ export const Layout: React.FC<{
   const [menuOpen, setMenuOpen] = useState(false)
   const critical = sos.active && sos.level === 'critical'
   const warning = sos.active && sos.level === 'warning'
+  /* a keyless simulator is a *notice*, not a problem: the header says so and
+     nothing is raised over the dashboard */
+  const notice = !sos.active && sos.level === 'notice'
   const mode = status?.mode || '—'
   const transport = status?.transport || '—'
 
@@ -247,8 +250,10 @@ export const Layout: React.FC<{
               </div>
               <span className="mono text-[0.65rem] dim">{(api?.used_pct ?? 0).toFixed(1)}%</span>
             </div>
-            <Chip color={critical ? 'var(--color-bear)' : warning ? 'var(--color-amber)' : 'var(--color-bull)'}>
-              {critical ? '☠ sos critical' : warning ? '⚠ degraded' : '● all systems green'}
+            <Chip color={critical ? 'var(--color-bear)' : warning ? 'var(--color-amber)'
+              : notice ? 'var(--color-cyan)' : 'var(--color-bull)'}>
+              {critical ? '☠ sos critical' : warning ? '⚠ degraded'
+                : notice ? '◈ simulator' : '● all systems green'}
             </Chip>
           </div>
         </header>

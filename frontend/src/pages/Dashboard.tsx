@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { Boxes, Map } from 'lucide-react'
-import { Chip } from '../components/Glass'
 import { BotMap3D } from '../components/BotMap3D'
 import { HQ } from '../components/hq/HQ'
 import type { HQSnapshot } from '../components/hq/HQ'
@@ -94,13 +93,6 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
     groups: stationLoad.map((s) => ({ key: s.key, label: s.label, working: s.working, total: s.total })),
   }), [status, equity, stats, working, trailing, winRate, stationLoad, scan, sos])
 
-  // the newest engine line drives the "what is the swarm doing" ticker
-  const activity = useMemo(() => {
-    const line = logs?.[0]
-    if (!line) return 'waiting for the first engine cycle…'
-    return `${line.bot_id || line.level}: ${line.message}`
-  }, [logs])
-
   useEffect(() => {
     if (!selected) return
     const t = window.setTimeout(() => setSelected(null), 60_000)
@@ -114,7 +106,6 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
       <div className="scroll-thin flex h-full min-h-0 flex-col overflow-hidden">
         {/* ── the floor controls: only what the room itself needs ────── */}
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <span className="text-[0.62rem] uppercase tracking-[0.18em] dim">Bot Work Zone</span>
           <div className="glass-row flex items-center gap-0.5 p-0.5">
             {([['hq', 'headquarters', <Boxes size={11} key="b" />],
               ['map', 'swarm map', <Map size={11} key="m" />]] as const).map(([k, label, icon]) => {
@@ -134,14 +125,6 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
             })}
           </div>
           <DetailToggle value={detail} onChange={setDetail} />
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <Chip>{status?.cycle ? `cycle #${status.cycle}` : 'standby'}</Chip>
-            <Chip color="var(--color-cyan)">{working} working</Chip>
-            {trailing > 0 && <Chip color="var(--color-cyan)">🔒 {trailing} trailing</Chip>}
-            <Chip color="var(--color-amber)">
-              bar closes in {Math.max(0, Math.round(scan.seconds_to_close || 0))}s
-            </Chip>
-          </div>
         </div>
 
         {/* ── the office ────────────────────────────────────────────── */}
@@ -181,12 +164,6 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
               className="h-full w-full"
             />
           )}
-
-          {/* what the swarm is doing right now — one line, nothing else */}
-          <div className="pointer-events-none absolute left-3 top-3 max-w-[60%]">
-            <p className="text-[0.58rem] uppercase tracking-[0.18em] dim">swarm activity</p>
-            <p className="mono truncate text-[0.7rem]" title={activity}>{activity}</p>
-          </div>
 
           {/* the agent card, only when a body is clicked */}
           {selectedBot && (

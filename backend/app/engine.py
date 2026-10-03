@@ -402,6 +402,13 @@ class TradingEngine:
                 self._raise_sos("critical", problems or ["connection lost"])
                 self.registry.set_status("connector-bot", "error", "SOS RAISED",
                                          message="; ".join(problems)[:200])
+            elif level == "notice":
+                # nothing to raise: the simulator is doing its job while the
+                # operator has not stored keys yet
+                self._note_connector_notice(problems)
+                self.registry.set_status(
+                    "connector-bot", "success", "simulator active",
+                    message="add the Binance API key + secret in Settings to go live")
             elif level == "warning":
                 self._raise_sos("warning", problems)
                 if waiting_for_keys:
@@ -426,7 +433,7 @@ class TradingEngine:
             if level != "critical" and (prev_level is None or prev_level == "critical"
                                         or (prev_level == "none" and level == "warning")):
                 self._wf("connector", "done", f"link {level} → Engine CEO informed")
-                if level == "warning" and waiting_for_keys:
+                if level == "notice" or (level == "warning" and waiting_for_keys):
                     self.log("info", "connector-bot",
                              "Simulation broker active — no Binance keys yet; add them in "
                              "Settings to go live. Engine CEO informed.",
@@ -444,16 +451,20 @@ class TradingEngine:
 
     def _connector_verdict(self, health: dict[str, Any]) -> tuple[str, list[str]]:
         """
-        Classify a Connector-Bot probe: ``none`` (green), ``warning`` (amber) or
-        ``critical`` (the ☠️ SOS siren that turns the dashboard red).
+        Classify a Connector-Bot probe: ``none`` (green), ``notice`` (the
+        simulator is running because no keys are stored yet), ``warning`` (a
+        configured link is degraded) or ``critical`` (the ☠️ SOS siren).
 
-        The siren is reserved for a link that is *supposed* to be up: keys are
-        stored and/or the transport is Binance.  A brand-new install that has no
-        keys yet gets the amber prompt — there is nothing to connect to, and a
-        permanently red dashboard would hide a real outage later.
+        Only a link that is *supposed* to be up can raise anything over the
+        dashboard.  A brand-new install with no keys gets a neutral ``notice``:
+        nothing is raised, nothing is paused, the floor simply states that the
+        simulator is working, and the whole swarm keeps trading it.
         """
         problems = list(health.get("problems") or [])
         creds = bool(self.store.api_key() and self.store.api_secret())
+        # no keys → there is nothing to connect to: never a problem, only a notice
+        if not creds and self.hub.transport != "binance":
+            return ("notice", problems or ["no Binance API keys stored — simulator active"])
         # live mode with keys but the transport fell back to the simulator
         if self.hub.transport != "binance" and self.store.cfg.binance.mode == "live" \
                 and self.hub.last_error:
@@ -462,8 +473,19 @@ class TradingEngine:
         if not health.get("connected"):
             hard = self.hub.transport == "binance" \
                 or not self.store.cfg.engine.simulate_when_offline
+            if not hard and not creds:
+                return "notice", (problems or ["simulator active — no keys stored"])
             return ("critical" if hard else "warning"), (problems or ["connection lost"])
         return ("warning", problems) if problems else ("none", problems)
+
+    def _note_connector_notice(self, reasons: list[str]) -> None:
+        """Keyless simulator: report the state, raise nothing over the UI."""
+        if self.sos["active"] or self.sos.get("level") != "notice" \
+                or set(reasons) != set(self.sos["reasons"]):
+            self.sos.update({"active": False, "level": "notice",
+                             "reasons": reasons[:6], "since": 0})
+            BUS.publish("sos.notice", {"level": "notice", "reasons": reasons[:6],
+                                       "at": now_ms()})
 
     def _raise_sos(self, level: str, reasons: list[str]) -> None:
         if level == "warning" and self.sos["active"] and self.sos["level"] == "critical":
@@ -491,10 +513,12 @@ class TradingEngine:
             self.registry.publish_all(GOVERNOR.snapshot())
 
     def _clear_sos(self) -> None:
-        if self.sos["active"]:
+        was_active = bool(self.sos["active"])
+        if was_active or self.sos.get("level") not in ("none", None):
             self.sos.update({"active": False, "level": "none", "reasons": [], "since": 0})
             BUS.publish("sos.off", {"at": now_ms()})
-            self.log("success", "connector-bot", "SOS cleared — connection healthy again")
+            if was_active:
+                self.log("success", "connector-bot", "SOS cleared — connection healthy again")
             self.paused = False
             self.registry.publish_all(GOVERNOR.snapshot())
 
