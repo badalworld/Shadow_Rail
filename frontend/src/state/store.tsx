@@ -48,18 +48,41 @@ const StoreCtx = createContext<StoreShape | null>(null)
 
 let uid = 1
 
+/* ── boot payload ──────────────────────────────────────────────────────────
+ * index.html ships a window.__SHADOW_RAIL_BOOT__ snapshot (the same frame the
+ * websocket sends on connect) so the first paint already shows live numbers
+ * instead of a flash of zeros while the socket handshakes.                */
+type Boot = {
+  status?: EngineStatus
+  bots?: Bot[]
+  links?: Link[]
+  equity?: EquityState
+  stats?: Stats
+  scan?: StoreShape['scan']
+  open_trades?: Trade[]
+  closed_trades?: { trades: Trade[]; total: number }
+  config?: any
+  ip?: any
+  curve?: { ts: number; cum: number }[]
+  logs?: LogRow[]
+}
+export const BOOT: Boot = (() => {
+  const g = globalThis as unknown as { __SHADOW_RAIL_BOOT__?: Boot }
+  return g.__SHADOW_RAIL_BOOT__ || {}
+})()
+
 export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [status, setStatus] = useState<EngineStatus | null>(null)
-  const [bots, setBots] = useState<Bot[]>([])
-  const [links, setLinks] = useState<Link[]>([])
-  const [equity, setEquity] = useState<EquityState | null>(null)
-  const [api, setApi] = useState<ApiState | null>(null)
-  const [logs, setLogs] = useState<LogRow[]>([])
-  const [openTrades, setOpenTrades] = useState<Trade[]>([])
-  const [scan, setScan] = useState<StoreShape['scan']>({
+  const [status, setStatus] = useState<EngineStatus | null>(BOOT.status ?? null)
+  const [bots, setBots] = useState<Bot[]>(BOOT.bots ?? [])
+  const [links, setLinks] = useState<Link[]>(BOOT.links ?? [])
+  const [equity, setEquity] = useState<EquityState | null>(BOOT.equity ?? null)
+  const [api, setApi] = useState<ApiState | null>(BOOT.status?.api ?? null)
+  const [logs, setLogs] = useState<LogRow[]>(BOOT.logs ?? [])
+  const [openTrades, setOpenTrades] = useState<Trade[]>(BOOT.open_trades ?? [])
+  const [scan, setScan] = useState<StoreShape['scan']>(BOOT.scan ?? {
     by_bot: {}, opportunities: [], cycle: 0, updated_at: 0, seconds_to_close: 0,
   })
-  const [stats, setStats] = useState<Stats | null>(null)
+  const [stats, setStats] = useState<Stats | null>(BOOT.stats ?? null)
   const [connected, setConnected] = useState(false)
   const [sos, setSos] = useState({ active: false, level: 'none', reasons: [] as string[], since: 0 })
   const [pulses, setPulses] = useState<StoreShape['pulses']>([])

@@ -72,6 +72,9 @@ secret, press **Test connection**, then add the displayed IP to your Binance key
 # tests (indicator port, risk maths, API governor, journal, full engine flow)
 cd backend && ../.venv/bin/python -m pytest -q
 
+# render every dashboard page against the live API (catches payload drift)
+cd frontend && node scripts/ssr-smoke.mjs capture && node scripts/ssr-smoke.mjs
+
 # indicator self-check against the Pine logic
 cd backend && ../.venv/bin/python -m app.indicators.ghost
 
@@ -111,6 +114,33 @@ backend/
 frontend/             React + TypeScript + Tailwind + three.js dashboard
 data/                 runtime state (git-ignored): config.json, journal, encrypted keys
 ```
+
+## How the money is accounted
+
+The dashboard never guesses. Every closed trade carries a `pnl_source`:
+
+| source | meaning |
+|---|---|
+| `fills` | the exchange reported the real fills — gross, fees and funding come straight from it |
+| `estimated` | no fills were visible, so P&L is inferred from prices (flagged amber in the UI) |
+| `unknown` | a position vanished with no fill history — recorded as 0 and **excluded from the win rate** |
+
+The Main Page always satisfies
+
+```
+exchange equity  =  starting balance + released P&L + unrealised − entry fees of open positions
+```
+
+A test (`test_equity_bridge_reconciles_with_the_exchange`) asserts that identity, and a
+regression test (`test_reconciliation_never_invents_pnl`) proves the journal can never
+fabricate a number when it restarts and finds a position gone.
+
+## Running offline
+
+Without Binance keys the engine boots the **simulation broker**: 150 assets, real
+indicator maths, real risk/verification pipeline, accelerated clock (one 5-minute candle
+every ~10 s) and a momentum/volatility-regime price model. The paper account is
+persisted, so restarts continue where they left off instead of resetting the demo.
 
 ## Safety model
 

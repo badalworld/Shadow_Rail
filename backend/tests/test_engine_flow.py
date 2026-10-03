@@ -329,3 +329,51 @@ async def test_take_profit_exit_is_recognised(db, store):
     closed = await eng._finalize_close(int(trade["id"]), trade["tp_price"])
     assert closed and closed["close_reason"] == "tp"
     assert closed["gross_pnl"] > 0 and closed["net_pnl"] > 0
+
+
+async def test_reconciliation_never_invents_pnl(db, store):
+    """A missing position with no fill history must book 0 with pnl_source
+    'unknown', and stay out of the win/loss rate."""
+    eng = await make_engine(store, universe=12)
+    await _set_price(eng, "BTCUSDT", 100.0)
+    trade = await eng._open_trade("execution-1", make_opportunity("BTCUSDT", "LONG", 100.0, 2.0),
+                                  {"equity": 10_000.0, "available": 10_000.0, "open_count": 0})
+    assert trade
+    # wipe the exchange record: the journal now has no matching position or fills
+    eng.hub.exchange.positions.clear()
+    eng.hub.exchange.fills.clear()
+    eng.open_trades.clear()
+    eng.symbol_to_trade.clear()
+
+    await eng._load_open_trades()
+    row = await DB.get_trade(int(trade["id"]))
+    assert row["status"] == "closed"
+    assert row["close_reason"] == "reconciled_missing"
+    assert row["net_pnl"] == 0 and row["gross_pnl"] == 0
+    assert row["pnl_source"] == "unknown"
+
+    stats = await DB.stats_summary()
+    assert stats["total_trades"] >= 1
+    assert stats["unreconciled"] >= 1
+    assert stats["wins"] == 0 and stats["losses"] == 0     # not counted either way
+
+
+async def test_reconciliation_uses_real_fills_when_available(db, store):
+    """If the exchange still reports the fills, book the true P&L."""
+    eng = await make_engine(store, universe=12)
+    await _set_price(eng, "ETHUSDT", 100.0)
+    trade = await eng._open_trade("execution-1", make_opportunity("ETHUSDT", "LONG", 100.0, 2.0),
+                                  {"equity": 10_000.0, "available": 10_000.0, "open_count": 0})
+    assert trade
+    sim: SimExchange = eng.hub.exchange
+    # close the position on the exchange side, then let the engine discover it
+    await sim.market_order("ETHUSDT", "SELL", float(trade["qty"]), reduce_only=True)
+    eng.open_trades.clear()
+    eng.symbol_to_trade.clear()
+
+    await eng._load_open_trades()
+    row = await DB.get_trade(int(trade["id"]))
+    assert row["status"] == "closed"
+    assert row["pnl_source"] == "fills"
+    assert row["fee_paid"] > 0
+    assert row["net_pnl"] != 0 or abs(row["gross_pnl"]) < 1e-6

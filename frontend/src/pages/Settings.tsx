@@ -4,7 +4,7 @@ import {
   Activity, CheckCircle2, Copy, Globe, KeyRound, RefreshCw, Save, ShieldAlert, Sliders, Waves, XCircle,
 } from 'lucide-react'
 import { endpoints } from '../lib/api'
-import { useStore } from '../state/store'
+import { BOOT, useStore } from '../state/store'
 import { Bar, Chip, Panel } from '../components/Glass'
 
 type Tab = 'api' | 'risk' | 'indicator' | 'engine' | 'danger'
@@ -20,8 +20,8 @@ const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
 export const Settings: React.FC = () => {
   const { pushToast, status, refresh } = useStore()
   const [tab, setTab] = useState<Tab>('api')
-  const [cfg, setCfg] = useState<any>(null)
-  const [ip, setIp] = useState<any>(null)
+  const [cfg, setCfg] = useState<any>(BOOT.config ?? null)
+  const [ip, setIp] = useState<any>(BOOT.ip ?? null)
   const [apiKey, setApiKey] = useState('')
   const [apiSecret, setApiSecret] = useState('')
   const [testing, setTesting] = useState(false)

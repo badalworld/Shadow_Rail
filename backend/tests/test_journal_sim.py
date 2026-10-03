@@ -137,3 +137,113 @@ async def test_sim_candles_are_closed_and_monotonic():
     assert times == sorted(times) and len(set(times)) == len(times)
     for c in candles:
         assert c.l <= min(c.o, c.c) <= max(c.o, c.c) <= c.h
+
+
+async def test_sim_state_survives_a_restart():
+    """A restart must not wipe the paper account: balance, positions and the
+    price level all continue where the previous run stopped."""
+    sim = SimExchange(universe=20, history_bars=300, warm_candles=60)
+    await sim.market_order("BTCUSDT", "BUY", 0.01)
+    await sim.market_order("ETHUSDT", "SELL", 0.2)
+    snapshot = sim.export_state()
+
+    reborn = SimExchange(universe=20, history_bars=300, warm_candles=60)
+    reborn.import_state(snapshot)
+
+    assert set(reborn.positions) == set(sim.positions)
+    assert reborn.balance == pytest.approx(sim.balance, rel=1e-9)
+    for sym in ("BTCUSDT", "ETHUSDT"):
+        assert reborn.syms[sym].price == pytest.approx(sim.syms[sym].price, rel=1e-9)
+        assert reborn.candles[sym][-1].c == pytest.approx(sim.candles[sym][-1].c, rel=1e-3)
+    # and it keeps trading from there
+    before = reborn.syms["BTCUSDT"].price
+    await reborn.step_bar()
+    assert reborn.syms["BTCUSDT"].price != before
+
+
+async def test_boot_payload_has_everything_the_dashboard_paints_with(db, store):
+    """The inlined first-paint snapshot must match the websocket hello frame."""
+    import app.api as api
+    from tests.test_engine_flow import make_engine
+
+    engine = await make_engine(store, universe=8)
+    previous, api.ENGINE = api.ENGINE, engine
+    try:
+        payload = await api.boot_payload()
+    finally:
+        api.ENGINE = previous
+
+    for key in ("bots", "status", "equity", "stats", "scan", "open_trades",
+                "closed_trades", "curve", "config", "logs", "links"):
+        assert key in payload, f"boot payload is missing {key}"
+    assert isinstance(payload["bots"], list) and payload["bots"]
+    assert "workflow" in payload["status"] and "api" in payload["status"]
+    # the API-key masking rule must survive the boot path
+    b = payload["config"]["binance"]
+    assert "api_secret" not in b and "api_secret_masked" in b
+
+
+async def test_hub_restores_a_persisted_paper_account(db, store):
+    """The hub must re-adopt the persisted sim snapshot on boot (balance,
+    positions and prices) — otherwise a restart silently resets the demo."""
+    from app.exchange.hub import MarketHub
+
+    store.cfg.engine.sim_time_accel = 3000.0
+    store.cfg.engine.universe_size = 20
+    store.cfg.binance.transport = "sim"
+    store.save()
+
+    first = MarketHub(store=store)
+    await first.start()
+    assert first.transport == "sim"
+    await first.exchange.market_order("BTCUSDT", "BUY", 0.01)
+    await first.persist_sim_state()
+    entry = first.exchange.positions["BTCUSDT"].entry
+
+    second = MarketHub(store=store)
+    await second.start()
+    assert "BTCUSDT" in second.exchange.positions
+    assert second.exchange.positions["BTCUSDT"].entry == pytest.approx(entry)
+    assert second.exchange.balance == pytest.approx(first.exchange.balance, rel=1e-9)
+    await second.stop()
+    await first.stop()
+
+
+async def test_equity_bridge_reconciles_with_the_exchange(db, store):
+    """starting + released + unrealised − open entry fees == exchange equity.
+
+    This is the arithmetic the Main Page shows; if it ever drifts, the
+    dashboard is lying about money.
+    """
+    from app.exchange.hub import MarketHub
+    from app.journal import Journal
+
+    store.cfg.engine.universe_size = 20
+    store.cfg.binance.transport = "sim"
+    store.cfg.engine.sim_time_accel = 3000.0
+    store.save()
+
+    hub = MarketHub(store=store)
+    await hub.start()
+    sim = hub.exchange
+    sym = "BTCUSDT"
+
+    journal = Journal(store=store)
+    account = await hub.account()
+    await journal.update(account)
+    assert journal.state.starting_balance == pytest.approx(sim.balance, rel=0.02)
+
+    # open a position and re-sync
+    await sim.market_order(sym, "BUY", 0.01)
+    account = await hub.account()
+    state = await journal.update(account)
+
+    bridge = (state.starting_balance + state.released_pnl
+              + state.unrealized - state.open_entry_fees)
+    assert state.open_entry_fees > 0
+    assert bridge == pytest.approx(account.total_margin_balance, rel=0.002), (
+        f"bridge {bridge:.2f} != exchange equity {account.total_margin_balance:.2f}")
+    # the reported total fee count includes the open position's entry leg
+    assert state.as_dict()["fees_paid_total"] == pytest.approx(
+        state.fees_paid + state.open_entry_fees, abs=1e-4)   # as_dict rounds to 4dp
+    await hub.stop()

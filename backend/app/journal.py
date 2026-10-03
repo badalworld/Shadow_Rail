@@ -37,7 +37,9 @@ class EquityState:
     margin_used: float = 0.0
     open_positions: int = 0
     released_pnl: float = 0.0          # realised net PnL (already after fees & funding)
-    fees_paid: float = 0.0
+    fees_paid: float = 0.0             # closed trades (entry + exit legs)
+    open_entry_fees: float = 0.0       # entry legs of positions still open
+    taker_fee_rate: float = 0.0005     # Binance USDT-M taker (0.05%)
     funding_paid: float = 0.0          # positive = net paid, negative = net received
     daily_pnl: float = 0.0
     day_start_equity: float = 0.0
@@ -59,6 +61,8 @@ class EquityState:
             "open_positions": self.open_positions,
             "released_pnl": round(self.released_pnl, 4),
             "fees_paid": round(self.fees_paid, 4),
+            "fees_paid_total": round(self.fees_paid + self.open_entry_fees, 4),
+            "open_entry_fees": round(self.open_entry_fees, 4),
             "funding_paid": round(self.funding_paid, 4),
             "funding_net": round(-self.funding_paid, 4),
             "daily_pnl": round(self.daily_pnl, 4),
@@ -67,7 +71,9 @@ class EquityState:
             "drawdown_pct": round(self.drawdown_pct, 2),
             "growth_pct": round(pct(self.equity, self.starting_balance), 2),
             "growth_abs": round(growth, 4),
-            "net_after_costs": round(self.released_pnl, 4),
+            "net_after_costs": round(self.released_pnl - self.open_entry_fees, 4),
+            "equity_bridge": round(self.starting_balance + self.released_pnl
+                                   + self.unrealized - self.open_entry_fees, 4),
         }
 
 
@@ -107,6 +113,23 @@ class Journal:
                                                "at": meta["at"]})
         return True
 
+    async def load_locked(self) -> bool:
+        """
+        Re-read the locked starting balance from storage.
+
+        Called at boot so the Main Page shows the locked figure immediately --
+        before the first account fetch (which may take a moment, or fail).
+        """
+        existing = await DB.kv_get(STARTING_BALANCE_KEY)
+        if not existing:
+            return False
+        self.state.starting_balance = float(existing)
+        self.state.starting_locked = True
+        meta = await DB.kv_get(STARTING_BALANCE_META, {}) or {}
+        self.state.starting_source = meta.get("source", "")
+        self.state.starting_at = int(meta.get("at", 0))
+        return True
+
     async def reset_starting_balance(self) -> None:
         """Operator-initiated only (Settings → danger zone)."""
         await DB.kv_set(STARTING_BALANCE_KEY, None)
@@ -132,6 +155,10 @@ class Journal:
         s.unrealized = account.total_unrealized_pnl
         s.margin_used = account.total_initial_margin
         s.open_positions = account.open_count
+        # the entry leg of an open position is already paid — count it so the
+        # "fees paid" tile and the equity bridge always reconcile
+        s.open_entry_fees = sum(abs(p.qty) * p.entry_price * s.taker_fee_rate
+                                for p in account.positions if abs(p.qty) > 0)
         s.peak_equity = max(s.peak_equity or s.equity, s.equity)
         s.drawdown_pct = ((s.peak_equity - s.equity) / s.peak_equity * 100.0) if s.peak_equity else 0.0
         await self.ensure_starting_balance(s.equity, account.source)

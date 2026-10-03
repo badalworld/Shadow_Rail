@@ -1,319 +1,425 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { motion } from 'framer-motion'
-import { Activity, ArrowDownRight, ArrowUpRight, Brain, Cpu, Eye, Gauge, Radio, ShieldCheck, Wallet } from 'lucide-react'
-import { useStore } from '../state/store'
-import { endpoints } from '../lib/api'
-import { Bar, Chip, Panel, Ring, Stat, clock, fmtMoney, fmtNum, fmtPct, timeAgo, statusColor } from '../components/Glass'
+import {
+  Activity, ArrowDownRight, ArrowUpRight, Coins, Gauge, Lock, Radio, Receipt,
+  ShieldCheck, TrendingUp, Users, Zap,
+} from 'lucide-react'
+import { Panel, Stat, Chip, Bar, statusColor, moodEmoji, fmtMoney, fmtNum, fmtPct, clock } from '../components/Glass'
+import { Donut, LineChart } from '../components/Charts'
 import { BotMap3D } from '../components/BotMap3D'
-import { LineChart, MiniMeter } from '../components/Charts'
-import type { Bot } from '../lib/types'
+import { endpoints } from '../lib/api'
+import { useStore } from '../state/store'
+import type { PageKey } from '../components/Layout'
 
-const STAGES: { key: string; label: string; icon: React.ReactNode }[] = [
-  { key: 'connector', label: 'Connector', icon: <Radio size={13} /> },
-  { key: 'scan', label: 'Scan ×5', icon: <Activity size={13} /> },
-  { key: 'analyze', label: 'Analyse ×10', icon: <Brain size={13} /> },
-  { key: 'execute', label: 'Execute', icon: <Cpu size={13} /> },
-  { key: 'verify', label: 'Verify', icon: <ShieldCheck size={13} /> },
-  { key: 'monitor', label: 'Monitor', icon: <Eye size={13} /> },
-  { key: 'close', label: 'Journal', icon: <Wallet size={13} /> },
+const STAGES: { key: string; label: string; bots: string }[] = [
+  { key: 'connector', label: 'Connector', bots: 'ORACLE' },
+  { key: 'scan', label: 'Scan ×5', bots: 'VEGA · NOVA · ORION · LYRA · ATLAS' },
+  { key: 'analyze', label: 'Analyse ×10', bots: 'EINSTEIN … BOHR' },
+  { key: 'execute', label: 'Execute ×2', bots: 'BOLT · TITAN' },
+  { key: 'verify', label: 'Verify', bots: 'ECHO' },
+  { key: 'monitor', label: 'Monitor ×4', bots: 'SENTINEL · WARDEN · WATCHMAN · GUARDIAN' },
+  { key: 'close', label: 'Journal', bots: 'LEDGER · BANKER · AEGIS' },
 ]
 
-export const Dashboard: React.FC<{ goTo: (p: any) => void }> = ({ goTo }) => {
-  const { status, bots, links, equity, stats, openTrades, logs, pulses, sos, scan, celebration } = useStore()
+const MiniStat: React.FC<{ label: string; value: string; tone?: 'bull' | 'bear' }> = ({ label, value, tone }) => (
+  <div>
+    <p className="text-[0.58rem] uppercase tracking-wider dim">{label}</p>
+    <p className="mono text-[0.78rem]" style={{
+      color: tone === 'bull' ? 'var(--color-bull)' : tone === 'bear' ? 'var(--color-bear)' : undefined,
+    }}>{value}</p>
+  </div>
+)
+
+function levelColor(level: string): string {
+  switch (level) {
+    case 'error': return 'var(--color-bear)'
+    case 'warn': return 'var(--color-amber)'
+    case 'success': return 'var(--color-bull)'
+    case 'sos': return '#ff2b4e'
+    default: return 'var(--sr-dim)'
+  }
+}
+
+export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) => {
+  const { status, equity, stats, openTrades, bots, links, logs, scan, pulses, sos } = useStore()
   const [selected, setSelected] = useState<string | null>(null)
   const [curve, setCurve] = useState<{ x: number; y: number }[]>([])
-  const critical = sos.active && sos.level === 'critical'
 
-  // real equity history (sampled by the Equity Manager), refreshed periodically
+  // real equity curve (chronological), refreshed while the page is open
   useEffect(() => {
     let alive = true
-    const pull = async () => {
+    const load = async () => {
       try {
         const res = await endpoints.equityCurve(400)
         if (!alive) return
-        const pts = (res.points || []).map((p: any, i: number) => ({ x: i, y: p.equity }))
-        const base = equity?.starting_balance ?? 0
-        setCurve(pts.length > 1 ? pts : [{ x: 0, y: base }, { x: 1, y: equity?.equity ?? base }])
-      } catch { /* keep the previous curve */ }
+        const pts = (res.points || res.curve || []).map((p: any) => ({ x: p.ts, y: p.equity }))
+        setCurve(pts)
+      } catch { /* the socket will retry */ }
     }
-    pull()
-    const t = setInterval(pull, 20000)
-    return () => { alive = false; clearInterval(t) }
-  }, [equity?.starting_balance, equity?.equity])
+    load()
+    const t = window.setInterval(load, 20_000)
+    return () => { alive = false; window.clearInterval(t) }
+  }, [])
 
-  const equityPoints = curve.length ? curve : [{ x: 0, y: equity?.equity ?? 0 }]
-
+  const wf = status?.workflow?.stages || {}
   const groups = useMemo(() => {
-    const g: Record<string, Bot[]> = {}
-    bots.forEach((b) => { (g[b.group] ||= []).push(b) })
+    const g: Record<string, { total: number; working: number }> = {}
+    for (const b of bots) {
+      g[b.group] = g[b.group] || { total: 0, working: 0 }
+      g[b.group].total++
+      if (b.status === 'working' || b.status === 'success' || b.status === 'celebrating') g[b.group].working++
+    }
     return g
   }, [bots])
 
-  const selectedBot = selected ? bots.find((b) => b.bot_id === selected) : null
-  const workflow = status?.workflow
-  const stageState = (k: string) => workflow?.stages?.[k]?.status || 'idle'
-
+  const winRate = stats?.win_rate ?? 0
+  const total = stats?.total_trades ?? 0
   const working = bots.filter((b) => b.status === 'working').length
+  const risk = status?.risk
+  const critic = sos.active && sos.level === 'critical'
 
   return (
-    <div className="scroll-thin flex h-full min-h-0 flex-col gap-3 overflow-y-auto pr-0.5">
-      {/* ── main numbers (exactly what the operator asked to see first) ── */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
-        <Stat label="Starting Balance" value={fmtMoney(equity?.starting_balance)} locked
+    <div className="flex flex-col gap-3">
+      {/* ── headline numbers ─────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <Stat
+          label="Starting Balance"
+          value={fmtMoney(equity?.starting_balance)}
+          locked={equity?.starting_locked}
+          icon={<Lock size={13} />}
+          tone="accent"
           sub={equity?.starting_at
-            ? `locked ${timeAgo(equity.starting_at)} · ${equity.starting_source || 'binance'}`
-            : 'locks on first connect'} />
-        <Stat label="Current Equity" value={fmtMoney(equity?.equity)} tone="accent"
-          sub={`${fmtPct(equity?.growth_pct)} vs start · avail ${fmtMoney(equity?.available)}`} />
-        <Stat label="Open Positions" value={`${equity?.open_positions ?? 0} / ${status?.max_trades ?? 10}`}
-          tone={(equity?.open_positions ?? 0) >= (status?.max_trades ?? 10) ? 'warn' : 'default'}
-          sub={`margin used ${fmtMoney(equity?.margin_used)} · ${fmtMoney(equity?.margin_budget)}/trade`} />
-        <Stat label="Released P&L" value={fmtMoney(equity?.released_pnl)}
+            ? `locked ${new Date(equity.starting_at).toLocaleString()} · ${equity.starting_source || ''}`
+            : 'locks on the first connection'}
+        />
+        <Stat
+          label="Current Equity"
+          value={fmtMoney(equity?.equity)}
+          icon={<Coins size={13} />}
+          tone={(equity?.growth_pct ?? 0) >= 0 ? 'good' : 'bad'}
+          sub={`${fmtPct(equity?.growth_pct)} since start · free ${fmtMoney(equity?.available)}`}
+        />
+        <Stat
+          label="Open Positions"
+          value={`${equity?.open_positions ?? 0} / ${equity?.max_trades ?? 10}`}
+          icon={<Activity size={13} />}
+          tone="warn"
+          sub={`margin ${fmtMoney(equity?.margin_used)} of ${fmtMoney(equity?.margin_budget)}`}
+        />
+        <Stat
+          label="Released P&L"
+          value={fmtMoney(equity?.released_pnl)}
+          icon={<TrendingUp size={13} />}
           tone={(equity?.released_pnl ?? 0) >= 0 ? 'good' : 'bad'}
-          sub={`unrealised ${fmtMoney(equity?.unrealized)}`} />
-        <Stat label="Fees Paid" value={fmtMoney(equity?.fees_paid)} tone="warn"
-          sub={`funding ${fmtMoney(-(equity?.funding_paid ?? 0))} net`} />
-        <Stat label="Win Rate" value={`${(stats?.win_rate ?? 0).toFixed(1)}%`}
-          sub={`${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L · ${stats?.total_trades ?? 0} closed`} />
-        <Stat label="Net After Costs" value={fmtMoney(equity?.net_after_costs)}
-          tone={(equity?.net_after_costs ?? 0) >= 0 ? 'good' : 'bad'}
-          sub={`PF ${(stats?.profit_factor ?? 0).toFixed(2)} · peak ${fmtMoney(equity?.peak_equity)}`} />
+          sub={`unrealised ${fmtMoney(equity?.unrealized)}`}
+        />
+        <Stat
+          label="Fees Paid"
+          value={fmtMoney(equity?.fees_paid_total ?? equity?.fees_paid)}
+          icon={<Receipt size={13} />}
+          tone="bad"
+          sub={`incl. ${fmtMoney(equity?.open_entry_fees)} on open positions · funding ${fmtMoney(equity?.funding_net)} net`}
+        />
+        <Stat
+          label="Win Rate"
+          value={`${winRate.toFixed(1)}%`}
+          icon={<Gauge size={13} />}
+          tone={winRate >= 50 ? 'good' : 'warn'}
+          sub={`${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L · ${total} closed · PF ${fmtNum(stats?.profit_factor, 2)}`}
+        />
       </div>
 
-      {/* ── workflow rail ── */}
-      <Panel title="Bot Workflow — live pipeline" right={
-        <div className="flex items-center gap-2 text-[0.65rem] dim">
-          <span>cycle #{workflow?.cycle ?? 0}</span>
-          <span>·</span>
-          <span>{working} bots working</span>
-          <span>·</span>
-          <span>next candle in {Math.max(0, Math.round(scan.seconds_to_close))}s</span>
-        </div>
-      } bodyClass="p-3">
-        <div className="flex flex-wrap items-stretch gap-2">
-          {STAGES.map((s, i) => {
-            const st = stageState(s.key)
-            const color = st === 'done' ? 'var(--color-bull)'
-              : st === 'start' ? 'var(--color-cyan)'
-                : st === 'error' ? 'var(--color-bear)' : '#5b6b80'
-            return (
-              <React.Fragment key={s.key}>
-                <motion.div
-                  initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.03 }}
-                  className="glass relative min-w-[8.5rem] flex-1 px-3 py-2"
-                  style={{
-                    borderColor: `color-mix(in oklab, ${color} 40%, transparent)`,
-                    boxShadow: st === 'start' ? `0 0 22px ${color}44` : undefined,
-                  }}>
-                  <div className="flex items-center gap-1.5 text-[0.65rem] font-semibold uppercase tracking-wider"
-                    style={{ color }}>
-                    {s.icon}{s.label}
-                  </div>
-                  <div className="mt-1 truncate text-[0.68rem] dim">
-                    {workflow?.stages?.[s.key]?.detail || 'waiting'}
-                  </div>
-                  {st === 'start' && <div className="flow-line mt-1.5 h-[2px] w-full rounded-full" />}
-                </motion.div>
-                {i < STAGES.length - 1 && (
-                  <div className="hidden items-center lg:flex">
-                    <div className="h-[1px] w-4"
-                      style={{ background: st === 'done' ? 'var(--color-bull)' : 'var(--sr-border)' }} />
-                  </div>
-                )}
-              </React.Fragment>
-            )
-          })}
-        </div>
-      </Panel>
-
-      {/* ── 3D swarm + side panels ── */}
-      <div className="grid min-h-0 grid-cols-1 gap-3 xl:grid-cols-[2.1fr_1fr]">
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1.55fr_1fr]">
+        {/* ── 3D swarm ─────────────────────────────────────────────── */}
         <Panel
-          title="3D Bot Swarm — click a node for details"
-          right={<div className="flex gap-1.5">
-            <Chip color="var(--color-cyan)">{links.length} rails</Chip>
-            <Chip color="var(--color-bull)">{bots.length} bots</Chip>
-            <Chip color={critical ? 'var(--color-bear)' : 'var(--color-bull)'}>
-              {critical ? 'sos' : 'nominal'}
-            </Chip>
-          </div>}
-          bodyClass="relative"
-          className="min-h-[26rem]"
-          accent={critical ? 'var(--color-bear)' : undefined}>
-          <div className="absolute inset-0">
-            <BotMap3D bots={bots} links={links} pulses={pulses} danger={critical}
-              onSelect={setSelected} className="h-full w-full" />
+          title="Bot Workflow — live 3D pipeline"
+          right={
+            <div className="flex flex-wrap items-center gap-2">
+              <Chip>cycle #{status?.cycle ?? 0}</Chip>
+              <Chip color="var(--color-cyan)">{working} bots working</Chip>
+              <Chip color="var(--color-amber)">
+                candle closes in {Math.max(0, Math.round(scan.seconds_to_close || 0))}s
+              </Chip>
+            </div>
+          }
+          bodyClass="p-2"
+        >
+          <div className="h-[22rem] w-full overflow-hidden rounded-xl md:h-[26rem]">
+            <BotMap3D
+              bots={bots}
+              links={links}
+              pulses={pulses}
+              danger={critic}
+              onSelect={setSelected}
+              className="h-full w-full"
+            />
           </div>
-          <div className="pointer-events-none absolute bottom-3 right-3 max-w-[16rem] text-[0.6rem] leading-relaxed dim">
-            Pulses show live data flow: Connector → CEO → Scanners → Analysts → Execution →
-            Verify → Monitors → Journal → Equity.
+          <div className="grid grid-cols-2 gap-2 px-1 pt-2 md:grid-cols-4">
+            {Object.entries(groups).map(([g, v]) => (
+              <button
+                key={g}
+                onClick={() => goTo?.('bots')}
+                className="glass-row flex items-center justify-between px-2 py-1.5 text-left transition-transform hover:scale-[1.02]"
+                style={{ cursor: 'pointer' }}
+              >
+                <span className="flex items-center gap-1.5 text-[0.68rem] uppercase tracking-wider dim">
+                  <Users size={11} /> {g}
+                </span>
+                <span className="mono text-[0.72rem]">
+                  <span style={{ color: v.working ? 'var(--color-cyan)' : 'var(--sr-text)' }}>{v.working}</span>
+                  <span className="dim">/{v.total}</span>
+                </span>
+              </button>
+            ))}
           </div>
+          <p className="px-1 pt-2 text-[0.65rem] dim">
+            Pulses travel the rails on every real event: Connector → CEO → Scanners → Analysts →
+            Execution → Verify → Monitor → Journal → Equity Manager.
+          </p>
         </Panel>
 
-        <div className="flex min-h-0 flex-col gap-3">
-          <Panel title="Swarm groups" bodyClass="p-3" className="shrink-0">
-            <div className="grid grid-cols-2 gap-2.5">
-              {Object.entries(groups).map(([g, list]) => {
-                const busy = list.filter((b) => b.status === 'working').length
-                const pct = (busy / list.length) * 100
+        <div className="flex flex-col gap-3">
+          {/* ── workflow rail ─────────────────────────────────────── */}
+          <Panel title="Pipeline stages" right={<Chip>{risk?.label || ''}</Chip>}>
+            <div className="flex flex-col gap-1.5">
+              {STAGES.map((s, i) => {
+                const st = wf[s.key] || { status: 'idle', detail: '' }
+                const color = statusColor(st.status === 'done' ? 'success' : st.status === 'error' ? 'error' : st.status)
+                const active = st.status === 'start'
+                const done = st.status === 'done'
                 return (
-                  <div key={g} className="glass-solid px-2.5 py-2">
-                    <div className="flex items-center justify-between text-[0.62rem] uppercase tracking-wider dim">
-                      <span>{g}</span><span className="mono">{busy}/{list.length}</span>
-                    </div>
-                    <div className="mt-1.5"><MiniMeter value={pct}
-                      color={busy ? 'var(--color-cyan)' : '#3f5468'} /></div>
-                    <div className="mt-1 truncate text-[0.6rem] dim">
-                      {list.slice(0, 2).map((b) => b.name).join(' · ')}{list.length > 2 ? ' …' : ''}
-                    </div>
+                  <div
+                    key={s.key}
+                    className="glass-row relative flex items-center gap-2 px-2 py-1.5"
+                    style={active ? { borderColor: color, boxShadow: 'var(--sr-glow)' } : undefined}
+                  >
+                    <span className={`pulse-dot ${active ? 'animate-pulse' : ''}`}
+                      style={{ background: color, width: 7, height: 7 }} />
+                    <span className="mono text-[0.62rem] dim">{String(i + 1).padStart(2, '0')}</span>
+                    <span className="text-[0.78rem]" style={{ color: done || active ? 'var(--sr-text)' : undefined }}>
+                      {s.label}
+                    </span>
+                    <span className="ml-auto max-w-[50%] truncate text-right text-[0.62rem] dim" title={st.detail}>
+                      {st.detail || st.status}
+                    </span>
                   </div>
                 )
               })}
             </div>
           </Panel>
 
-          <Panel title={selectedBot ? `${selectedBot.name} · ${selectedBot.role}` : 'Bot inspector'}
-            bodyClass="p-3" className="min-h-[12rem] flex-1"
-            right={selectedBot && <Chip color={statusColor(selectedBot.status)}>{selectedBot.status}</Chip>}>
-            {selectedBot ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2 text-[0.7rem]">
-                  <span className="chip" style={{ color: statusColor(selectedBot.status) }}>
-                    {selectedBot.rank}
-                  </span>
-                  <span className="dim">score {selectedBot.metrics.score.toFixed(1)}</span>
-                  <span className="dim">· {selectedBot.metrics.tasks_done} tasks</span>
-                </div>
-                <div className="text-[0.72rem]">{selectedBot.task}</div>
-                <div className="text-[0.68rem] dim">{selectedBot.message}</div>
-                <Bar value={selectedBot.progress * 100} color={statusColor(selectedBot.status)} />
-                <div className="grid grid-cols-2 gap-2 text-[0.62rem] dim">
-                  <div>api window: <span className="mono">{selectedBot.metrics.api_spent_window}</span></div>
-                  <div>latency: <span className="mono">{selectedBot.metrics.avg_latency_ms.toFixed(0)}ms</span></div>
-                  <div>wins: <span className="mono">{selectedBot.metrics.wins}</span></div>
-                  <div>errors: <span className="mono">{selectedBot.metrics.errors}</span></div>
-                </div>
-                <div className="mt-1 text-[0.62rem] dim">
-                  {selectedBot.assigned.length
-                    ? <>watching: <span className="mono">{selectedBot.assigned.slice(0, 8).join(', ')}
-                      {selectedBot.assigned.length > 8 ? ` +${selectedBot.assigned.length - 8}` : ''}</span></>
-                    : 'no assets assigned'}
-                </div>
-                <button className="chip mt-1 justify-center hover:opacity-80"
-                  onClick={() => goTo('bots')}>open roster →</button>
+          {/* ── equity ────────────────────────────────────────────── */}
+          <Panel
+            title="Equity"
+            right={
+              <span className="mono text-[0.8rem]"
+                style={{ color: (equity?.growth_pct ?? 0) >= 0 ? 'var(--color-bull)' : 'var(--color-bear)' }}>
+                {fmtPct(equity?.growth_pct)}
+              </span>
+            }
+          >
+            <div className="grid grid-cols-3 gap-2">
+              <MiniStat label="equity" value={fmtMoney(equity?.equity)} />
+              <MiniStat label="start 🔒" value={fmtMoney(equity?.starting_balance)} />
+              <MiniStat label="peak" value={fmtMoney(equity?.peak_equity)} />
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-2">
+              <MiniStat label="drawdown" value={`${(equity?.drawdown_pct ?? 0).toFixed(2)}%`} tone="bear" />
+              <MiniStat label="slots free" value={String(equity?.open_slots ?? 0)} />
+              <MiniStat label="today" value={fmtMoney(equity?.daily_pnl)}
+                tone={(equity?.daily_pnl ?? 0) >= 0 ? 'bull' : 'bear'} />
+            </div>
+            <div className="mt-3 flex items-center gap-4">
+              <Donut
+                slices={[
+                  { label: 'wins', value: stats?.wins ?? 0, color: 'var(--color-bull)' },
+                  { label: 'losses', value: stats?.losses ?? 0, color: 'var(--color-bear)' },
+                ]}
+                size={104}
+                center={
+                  <div className="text-center">
+                    <p className="mono text-[0.95rem]">{total ? `${winRate.toFixed(0)}%` : '—'}</p>
+                    <p className="text-[0.55rem] uppercase tracking-wider dim">{total} trades</p>
+                  </div>
+                }
+              />
+              <div className="flex-1 text-[0.7rem]">
+                <p className="dim">avg win <span className="mono" style={{ color: 'var(--color-bull)' }}>{fmtMoney(stats?.avg_win)}</span></p>
+                <p className="dim">avg loss <span className="mono" style={{ color: 'var(--color-bear)' }}>{fmtMoney(stats?.avg_loss)}</span></p>
+                <p className="dim">best <span className="mono">{stats?.best_symbol || '—'}</span></p>
+                <p className="dim">worst <span className="mono">{stats?.worst_symbol || '—'}</span></p>
               </div>
-            ) : (
-              <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-                <Gauge size={26} className="dim" />
-                <div className="text-[0.7rem] dim">Click any node in the 3D swarm<br />to inspect that bot live.</div>
-              </div>
-            )}
+            </div>
+            <div className="mt-3 h-24">
+              {curve.length > 1
+                ? <LineChart data={curve} height={96} baseline={equity?.starting_balance} color="var(--color-cyan)" />
+                : <p className="pt-6 text-center text-[0.7rem] dim">equity curve builds as trades close</p>}
+            </div>
           </Panel>
         </div>
       </div>
 
-      {/* ── live positions + equity + logs ── */}
-      <div className="grid min-h-[17rem] grid-cols-1 gap-3 xl:grid-cols-[1.5fr_1fr_1fr]">
-        <Panel title={`Open positions ${openTrades.length}/${status?.max_trades ?? 10}`}
-          right={<Chip color="var(--color-cyan)">{openTrades.length ? 'live' : 'flat'}</Chip>}
-          bodyClass="scroll-thin overflow-auto">
+      {/* ── open positions + ticker ───────────────────────────────── */}
+      <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1.55fr_1fr]">
+        <Panel
+          title="Open positions"
+          right={
+            <div className="flex items-center gap-2">
+              <Chip color={openTrades.length > 0 ? 'var(--color-bull)' : undefined}>
+                {openTrades.length > 0 ? 'live' : 'flat'}
+              </Chip>
+              <button className="chip hover:opacity-80" style={{ cursor: 'pointer' }} onClick={() => goTo?.('trades')}>
+                history →
+              </button>
+            </div>
+          }
+          bodyClass="p-0"
+        >
           {openTrades.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-[0.72rem] dim">
-              Flat — scanners are hunting the next confirmed flip
+            <div className="flex flex-col items-center gap-1 px-4 py-8 text-center">
+              <ShieldCheck size={22} style={{ color: 'var(--color-cyan)' }} />
+              <p className="text-[0.8rem]">Flat — scanners are hunting the next confirmed flip.</p>
+              <p className="text-[0.68rem] dim">
+                {risk ? `${risk.size_pct ?? ''}` : ''}one position per symbol · stop always inside liquidation
+              </p>
             </div>
           ) : (
-            <table className="w-full text-[0.7rem]">
-              <thead className="sticky top-0 text-[0.6rem] uppercase tracking-wider dim"
-                style={{ background: 'rgba(5,7,12,0.8)' }}>
-                <tr>
-                  <th className="px-3 py-1.5 text-left">Symbol</th>
-                  <th className="text-left">Side</th>
-                  <th className="text-right">Entry</th>
-                  <th className="text-right">Mark</th>
-                  <th className="text-right">uPnL</th>
-                  <th className="text-right">SL / TP</th>
-                  <th className="text-right">Liq</th>
-                  <th className="px-3 text-right">Bot</th>
-                </tr>
-              </thead>
-              <tbody>
-                {openTrades.map((t) => {
-                  const up = (t.unrealized ?? 0) >= 0
-                  return (
-                    <tr key={t.id} className="glass-row border-t" style={{ borderColor: 'var(--sr-border)' }}>
-                      <td className="px-3 py-1.5 font-semibold">{t.symbol}</td>
-                      <td>
-                        <span className="inline-flex items-center gap-1"
-                          style={{ color: t.side === 'LONG' ? 'var(--color-bull)' : 'var(--color-bear)' }}>
-                          {t.side === 'LONG' ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
-                          {t.side}
-                        </span>
-                      </td>
-                      <td className="mono text-right">{fmtNum(t.entry_price)}</td>
-                      <td className="mono text-right">{fmtNum(t.mark ?? t.entry_price)}</td>
-                      <td className="mono text-right" style={{ color: up ? 'var(--color-bull)' : 'var(--color-bear)' }}>
-                        {fmtMoney(t.unrealized)} ({fmtPct(t.unrealized_pct)})
-                      </td>
-                      <td className="mono text-right dim">
-                        {fmtNum(t.sl_price)} / {t.tp_price ? fmtNum(t.tp_price) : 'flip'}
-                      </td>
-                      <td className="mono text-right dim">{fmtNum(t.liquidation_live ?? t.liquidation_price)}</td>
-                      <td className="px-3 text-right text-[0.62rem] dim">{t.monitor_id || t.monitor_bot_id || '—'}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+            <div className="scroll-thin overflow-x-auto">
+              <table className="w-full text-left text-[0.72rem]">
+                <thead className="text-[0.62rem] uppercase tracking-wider dim">
+                  <tr>
+                    <th className="px-3 py-2">Symbol</th>
+                    <th>Side</th>
+                    <th className="text-right">Entry</th>
+                    <th className="text-right">Mark</th>
+                    <th className="text-right">uPnL</th>
+                    <th className="text-right">SL / TP</th>
+                    <th className="text-right">Liq</th>
+                    <th className="px-3 text-right">Monitor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openTrades.map((t) => {
+                    const up = (t.unrealized ?? 0) >= 0
+                    const liqDist = t.mark && t.liquidation_price
+                      ? Math.abs((t.liquidation_price - t.mark) / t.mark) * 100 : 999
+                    return (
+                      <tr key={t.id} className="glass-row">
+                        <td className="px-3 py-1.5 mono">{t.symbol}</td>
+                        <td>
+                          <span className="flex items-center gap-1"
+                            style={{ color: t.side === 'LONG' ? 'var(--color-bull)' : 'var(--color-bear)' }}>
+                            {t.side === 'LONG' ? <ArrowUpRight size={11} /> : <ArrowDownRight size={11} />}
+                            {t.side}
+                          </span>
+                        </td>
+                        <td className="mono text-right">{fmtNum(t.entry_price, 6)}</td>
+                        <td className="mono text-right">{fmtNum(t.mark, 6)}</td>
+                        <td className="mono text-right" style={{ color: up ? 'var(--color-bull)' : 'var(--color-bear)' }}>
+                          {fmtMoney(t.unrealized)} ({fmtPct(t.unrealized_pct)})
+                        </td>
+                        <td className="mono text-right dim">{fmtNum(t.sl_price, 6)} / {fmtNum(t.tp_price, 6)}</td>
+                        <td className="mono text-right"
+                          style={{ color: liqDist < 12 ? 'var(--color-bear)' : undefined }}>
+                          {fmtNum(t.liquidation_price, 6)}
+                        </td>
+                        <td className="px-3 text-right mono dim">{t.monitor_id || t.monitor_bot_id || '—'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </Panel>
 
-        <Panel title="Equity" right={<Chip>{fmtPct(equity?.growth_pct)}</Chip>} bodyClass="p-3">
-          <div className="flex h-[6.5rem] items-center">
-            <LineChart data={equityPoints} baseline={equity?.starting_balance}
-              color={(equity?.equity ?? 0) >= (equity?.starting_balance ?? 0)
-                ? 'var(--color-bull)' : 'var(--color-bear)'} />
-          </div>
-          <div className="mt-2 grid grid-cols-2 gap-2 text-[0.65rem]">
-            <div className="dim">equity <span className="mono accent-text">{fmtMoney(equity?.equity)}</span></div>
-            <div className="dim">start <span className="mono">{fmtMoney(equity?.starting_balance)}</span></div>
-            <div className="dim">drawdown <span className="mono">{fmtPct(-(equity?.drawdown_pct ?? 0))}</span></div>
-            <div className="dim">slots <span className="mono">{equity?.open_slots ?? 0} free</span></div>
-          </div>
-          <div className="mt-3 flex items-center gap-3">
-            <Ring value={stats?.win_rate ?? 0} size={62} label={
-              <span className="mono text-[0.68rem]">{(stats?.win_rate ?? 0).toFixed(0)}%</span>
-            } />
-            <div className="text-[0.62rem] leading-relaxed dim">
-              <div><span className="mono">{stats?.wins ?? 0}</span> wins ·
-                <span className="mono"> {stats?.losses ?? 0}</span> losses</div>
-              <div>avg win <span className="mono">{fmtMoney(stats?.avg_win)}</span></div>
-              <div>avg loss <span className="mono">{fmtMoney(stats?.avg_loss)}</span></div>
-              <div>best <span className="mono accent-text">{stats?.best_symbol || '—'}</span></div>
-            </div>
-          </div>
-        </Panel>
-
-        <Panel title="Workflow log" right={<Chip>{logs.length}</Chip>}
-          bodyClass="scroll-thin overflow-auto p-0">
-          <div className="flex flex-col">
-            {logs.slice(0, 60).map((l, i) => (
-              <div key={l.id ?? i}
-                className="glass-row flex items-start gap-2 border-b px-3 py-1.5 text-[0.66rem]"
-                style={{ borderColor: 'rgba(255,255,255,0.04)' }}>
+        <Panel title="Workflow log" right={<Chip color="var(--color-cyan)">{logs.length} lines</Chip>}>
+          <div className="scroll-thin flex max-h-[16rem] flex-col gap-1 overflow-y-auto pr-1">
+            {logs.length === 0 && <p className="text-[0.72rem] dim">no log lines yet</p>}
+            {[...logs].slice(-30).reverse().map((l, i) => (
+              <div key={`${l.ts}-${i}`} className="flex items-start gap-2 text-[0.68rem]">
                 <span className="mono shrink-0 dim">{clock(l.ts)}</span>
-                <span className="shrink-0 font-semibold" style={{
-                  color: l.level === 'error' || l.level === 'sos' ? 'var(--color-bear)'
-                    : l.level === 'warn' ? 'var(--color-amber)'
-                      : l.level === 'success' ? 'var(--color-bull)' : 'var(--sr-accent)',
-                }}>{l.bot_id}</span>
+                <span className="chip shrink-0"
+                  style={{ borderColor: levelColor(l.level), color: levelColor(l.level), fontSize: '0.55rem', padding: '0 0.3rem' }}>
+                  {(l.bot_id || l.level).slice(0, 15)}
+                </span>
                 <span className="min-w-0 flex-1 truncate" title={l.message}>{l.message}</span>
               </div>
             ))}
-            {!logs.length && <div className="p-6 text-center text-[0.7rem] dim">no log lines yet</div>}
           </div>
         </Panel>
       </div>
+
+      {selected && (
+        <Panel
+          title={`Bot inspector — ${selected}`}
+          right={
+            <button className="chip hover:opacity-80" style={{ cursor: 'pointer' }}
+              onClick={() => setSelected(null)}>close</button>
+          }
+        >
+          {(() => {
+            const b = bots.find((x) => x.bot_id === selected)
+            if (!b) {
+              return (
+                <p className="text-[0.75rem] dim">
+                  This node is a team rail (a whole group), not a single agent — open the Bot Roster
+                  to inspect its members.
+                </p>
+              )
+            }
+            return (
+              <div className="flex flex-wrap items-center gap-4">
+                <span className="text-3xl">{moodEmoji(b.mood)}</span>
+                <div>
+                  <p className="mono text-[0.9rem]">{b.name}</p>
+                  <p className="text-[0.7rem] dim">{b.role} · {b.group} · {b.rank}</p>
+                </div>
+                <div className="min-w-[12rem] flex-1">
+                  <Bar value={b.progress} color={b.color} glow />
+                  <p className="pt-1 text-[0.68rem] dim">{b.task || b.message || b.status}</p>
+                </div>
+                <div className="flex gap-4">
+                  <MiniStat label="score" value={String(Math.round(b.metrics?.score ?? 0))} />
+                  <MiniStat label="tasks" value={String(b.metrics?.tasks_done ?? 0)} />
+                  <MiniStat label="wins" value={String(b.metrics?.wins ?? 0)} tone="bull" />
+                  <MiniStat label="errors" value={String(b.metrics?.errors ?? 0)} tone="bear" />
+                  <MiniStat label="api/window" value={String(b.metrics?.api_spent_window ?? 0)} />
+                </div>
+                <button className="chip hover:opacity-80" style={{ cursor: 'pointer' }} onClick={() => goTo?.('bots')}>
+                  open dossier →
+                </button>
+              </div>
+            )
+          })()}
+        </Panel>
+      )}
+
+      {/* ── celebration tape ─────────────────────────────────────── */}
+      <Panel title="Latest closes" right={<Zap size={13} />}>
+        {(() => {
+          const closes = (logs || []).filter((l) => /closed \(|reconciled/i.test(l.message)).slice(-6).reverse()
+          if (!closes.length) {
+            return <p className="text-[0.72rem] dim">no closed trades yet — the first win is celebrated here 🎉</p>
+          }
+          return (
+            <div className="flex flex-wrap gap-2">
+              {closes.map((l, i) => {
+                const win = /net \+\$/.test(l.message)
+                return (
+                  <span key={i} className="chip" style={{
+                    borderColor: win ? 'var(--color-bull)' : 'var(--color-bear)',
+                    color: win ? 'var(--color-bull)' : 'var(--color-bear)',
+                  }}>
+                    {win ? '🎉' : '💧'} {l.message.slice(0, 76)}
+                  </span>
+                )
+              })}
+            </div>
+          )
+        })()}
+      </Panel>
     </div>
   )
 }
+
+export default Dashboard

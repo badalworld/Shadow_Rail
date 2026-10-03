@@ -46,6 +46,29 @@ class SymbolState:
 
 
 class MarketHub:
+    # ------------------------------------------------------- sim persistence
+    SIM_STATE_KEY = "sim_state_v1"
+
+    async def _load_sim_state(self) -> dict | None:
+        """Read the stored paper-account snapshot (used when booting the sim)."""
+        with contextlib.suppress(Exception):
+            from ..db import DB
+            return await DB.kv_get(self.SIM_STATE_KEY)
+        return None
+
+    async def persist_sim_state(self) -> None:
+        """Keep the paper account across restarts so the journal never lies."""
+        if self.transport != "sim" or not isinstance(self.exchange, SimExchange):
+            return
+        with contextlib.suppress(Exception):
+            from ..db import DB
+            await DB.kv_set(self.SIM_STATE_KEY, self.exchange.export_state())
+
+    async def reset_sim_state(self) -> None:
+        with contextlib.suppress(Exception):
+            from ..db import DB
+            await DB.kv_del(self.SIM_STATE_KEY)
+
     def __init__(self, store: ConfigStore = STORE, exchange=None):
         self.store = store
         self.exchange: BinanceFutures | SimExchange | None = exchange
@@ -108,6 +131,11 @@ class MarketHub:
                               universe=self.store.cfg.engine.universe_size,
                               time_accel=self.store.cfg.engine.sim_time_accel,
                               interval=self.store.cfg.engine.monitored_timeframe)
+            restored = await self._load_sim_state()
+            if restored:
+                with contextlib.suppress(Exception):
+                    sim.import_state(restored)
+                    BUS.publish("transport.restored", {"positions": len(sim.positions)})
             self.exchange = sim
             self.transport = "sim"
             if self.mode == "live":

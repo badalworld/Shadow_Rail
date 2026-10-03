@@ -14,7 +14,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .bots import build_registry, workflow_links
@@ -474,12 +474,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     e = eng()
     try:
         await ws.send_text(json.dumps({
-            "topic": "hello", "ts": now_ms(),
-            "data": {"bots": e.registry.snapshot(GOVERNOR.snapshot()),
-                     "status": e.status(),
-                     "equity": e.last_equity or JOURNAL.state.as_dict(),
-                     "logs": await DB.query_logs(limit=80),
-                     "links": workflow_links()}}))
+            "topic": "hello", "ts": now_ms(), "data": await boot_payload()},
+            default=str))
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=12.0)
@@ -499,24 +495,64 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 if WEB_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(WEB_DIR / "assets")), name="assets")
 
+    async def render_index() -> Any:
+        """Serve the SPA shell with a boot snapshot inlined so the first paint
+        already shows live numbers (no flash of zeros before the socket opens)."""
+        index = WEB_DIR / "index.html"
+        if not index.exists():
+            raise HTTPException(404, "dashboard bundle not built")
+        html = index.read_text(encoding="utf-8")
+        if "__SHADOW_RAIL_BOOT__" in html:
+            return HTMLResponse(html)
+        try:
+            boot = await boot_payload()
+            payload = json.dumps(boot, default=str).replace("</", "<\\/")
+            tag = f'<script>window.__SHADOW_RAIL_BOOT__={payload}</script>'
+            html = html.replace("</head>", tag + "</head>", 1) if "</head>" in html \
+                else tag + html
+        except Exception:
+            pass                       # a broken snapshot must never block the UI
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
     @app.get("/{full_path:path}")
     async def spa(full_path: str, request: Request):
         if full_path.startswith("api/") or full_path == "ws":
             raise HTTPException(404, "not found")
         candidate = WEB_DIR / full_path
         if full_path and candidate.is_file():
-            return FileResponse(candidate)
-        index = WEB_DIR / "index.html"
-        if index.exists():
-            return FileResponse(index)
-        raise HTTPException(404, "dashboard bundle not built")
+            return FileResponse(candidate, headers={"Cache-Control": "no-store"})
+        return await render_index()
+
+
+async def boot_payload() -> dict[str, Any]:
+    """The same frame the websocket hello sends — shared by `/` and `/ws`."""
+    e = eng()
+    snap = dict(e.scan_snapshot or {})
+    rows = [dict(t) for t in e.open_trades.values()]
+    return {"bots": e.registry.snapshot(GOVERNOR.snapshot()),
+            "status": e.status(),
+            "equity": e.last_equity or JOURNAL.state.as_dict(),
+            "stats": await JOURNAL.refresh_stats(),
+            "scan": {"by_bot": snap.get("by_bot", {}),
+                     "opportunities": snap.get("opportunities", []),
+                     "cycle": snap.get("cycle", 0),
+                     "updated_at": snap.get("updated_at", 0),
+                     "seconds_to_close": snap.get("seconds_to_close", 0)},
+            "open_trades": rows,
+            "closed_trades": {"trades": await DB.closed_trades(limit=100),
+                              "total": await DB.count_closed()},
+            "config": STORE.public_view(),
+            "ip": await ip_info(),
+            "curve": await JOURNAL.cumulative_pnl(limit=400),
+            "logs": await DB.query_logs(limit=80),
+            "links": workflow_links()}
 
 
 @app.get("/")
 async def root() -> Any:
     index = WEB_DIR / "index.html"
     if index.exists():
-        return FileResponse(index)
+        return await render_index()
     return JSONResponse({
         "service": "Shadow Rail API",
         "docs": "/docs",

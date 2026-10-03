@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS trades (
     entry_order_id    TEXT,
     exit_order_id     TEXT,
     mode              TEXT DEFAULT 'live',
+    pnl_source        TEXT DEFAULT 'fills',      -- fills | estimated | unknown
     notes             TEXT,
     created_at        INTEGER NOT NULL,
     updated_at        INTEGER NOT NULL
@@ -133,6 +134,12 @@ class Database:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
+        # lightweight migrations for databases created by earlier versions
+        cur = await self.conn.execute("PRAGMA table_info(trades)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "pnl_source" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE trades ADD COLUMN pnl_source TEXT DEFAULT 'fills'")
         await self.conn.commit()
 
     async def close(self) -> None:
@@ -159,6 +166,10 @@ class Database:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
             (key, json.dumps(value), now_ms()),
         )
+        await self.conn.commit()
+
+    async def kv_del(self, key: str) -> None:
+        await self.conn.execute("DELETE FROM kv WHERE key = ?", (key,))
         await self.conn.commit()
 
     # ---------------------------------------------------------------- logs
@@ -272,7 +283,8 @@ class Database:
     async def all_closed_for_stats(self) -> list[dict]:
         cur = await self.conn.execute(
             "SELECT net_pnl, fee_paid, funding_paid, gross_pnl, closed_at, symbol, side, "
-            "close_reason FROM trades WHERE status='closed' ORDER BY closed_at ASC")
+            "close_reason, COALESCE(pnl_source,'fills') AS pnl_source FROM trades "
+            "WHERE status='closed' ORDER BY closed_at ASC")
         rows = await cur.fetchall()
         await cur.close()
         return [dict(r) for r in rows]
@@ -355,7 +367,11 @@ class Database:
 
     async def stats_summary(self) -> dict:
         """Aggregate P&L statistics straight from the journal (source of truth)."""
-        rows = await self.all_closed_for_stats()
+        all_rows = await self.all_closed_for_stats()
+        # Trades whose outcome the exchange never reported are counted in the
+        # totals but excluded from win/loss so the win rate stays truthful.
+        unknown = [r for r in all_rows if (r.get("pnl_source") or "fills") == "unknown"]
+        rows = [r for r in all_rows if (r.get("pnl_source") or "fills") != "unknown"]
         wins = [r for r in rows if fnum_net(r) > 0]
         losses = [r for r in rows if fnum_net(r) <= 0]
         gross = sum(fnum_net(r) for r in rows)
@@ -366,7 +382,9 @@ class Database:
         best = max(wins, key=fnum_net, default=None)
         worst = min(losses, key=fnum_net, default=None)
         return {
-            "total_trades": len(rows),
+            "total_trades": len(all_rows),
+            "rated_trades": len(rows),
+            "unreconciled": len(unknown),
             "wins": len(wins),
             "losses": len(losses),
             "win_rate": (len(wins) / len(rows) * 100.0) if rows else 0.0,

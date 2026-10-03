@@ -162,6 +162,16 @@ class TradingEngine:
             self.store.cfg.engine.scanner_bots, self.store.cfg.engine.assets_per_bot)
         self._assign_scanner_symbols()
         await self._load_open_trades()
+        # show the locked starting balance straight away
+        with contextlib.suppress(Exception):
+            await self.journal.load_locked()
+        if self.journal.state.starting_locked and not self.last_equity:
+            with contextlib.suppress(Exception):
+                self.last_equity = {
+                    **self.journal.state.as_dict(),
+                    "mode": self.hub.mode, "transport": self.hub.transport,
+                    "open_slots": self.store.cfg.risk.max_concurrent_trades,
+                }
         self.log("info", "ceo-bot", f"Engine starting — transport={self.hub.transport} "
                                    f"mode={self.hub.mode} universe={len(self.hub.universe)}")
         self.tasks = [
@@ -346,9 +356,12 @@ class TradingEngine:
 
     async def _equity_loop(self) -> None:
         """Equity Manager: keep balance, equity, margin budget live."""
+        first = True
         while self.running:
             try:
-                await asyncio.sleep(5)
+                if not first:
+                    await asyncio.sleep(5)
+                first = False
                 if not self.running:
                     return
                 account = await self.hub.account()
@@ -361,6 +374,10 @@ class TradingEngine:
                            "margin_budget": round(self.journal.margin_budget(), 2)}
                 self.last_equity = payload
                 BUS.publish("equity.update", payload)
+                # keep the paper account durable across restarts (sim only)
+                self._persist_tick = getattr(self, "_persist_tick", 0) + 1
+                if self._persist_tick % 6 == 0:
+                    await self.hub.persist_sim_state()
                 self.registry.set_status(
                     "equity-manager-bot", "working", "balance sync",
                     message=f"equity ${state.equity:,.2f} · "
@@ -602,10 +619,6 @@ class TradingEngine:
             return None                                  # gate not warm yet → skip
         if self.cooldowns.get(symbol, 0) > time.time():
             return None
-        i = series.last
-        flow_smooth = 0.0
-        with contextlib.suppress(Exception):
-            flow_smooth = float(ghost.P.nz(series.volume[i], 0.0))
         return Opportunity(
             symbol=symbol, direction=sig["direction"], entry=sig["entry"],
             stop=sig["stop"], target=sig["target"], atr=sig["atr"],
@@ -1187,6 +1200,9 @@ class TradingEngine:
                               reason_detail: str = "", orders_cancelled: bool = False,
                               exit_order_id: str = "", allow_estimate: bool = True
                               ) -> dict | None:
+        # pnl_source: 'fills' when the exchange reported the real fills,
+        #             'estimated' when we had to infer from a price,
+        #             'unknown'  when neither was available (never invented)
         trade = self.open_trades.get(trade_id)
         if not trade:
             return None
@@ -1197,6 +1213,7 @@ class TradingEngine:
         opened_at = int(trade["opened_at"])
 
         gross = fee = 0.0
+        pnl_source = "unknown" if fallback_price is None else "estimated"
         exit_price = fallback_price or self.hub.price(symbol)
         closed_at = now_ms()
         entry_oid = str(trade.get("entry_order_id") or "")
@@ -1214,6 +1231,8 @@ class TradingEngine:
             # exchange-side stop carries an order id the engine never saw.
             exact = [f for f in fresh if f.order_id and f.order_id in (entry_oid, exit_oid)]
             used = fresh
+            if used:
+                pnl_source = "fills"
             if exact and len(exact) < len(fresh):
                 self.log("debug", "trade-manager-bot",
                          f"{symbol}: {len(fresh) - len(exact)} fill(s) matched by window "
@@ -1232,10 +1251,12 @@ class TradingEngine:
             elif allow_estimate:
                 gross = (exit_price - entry) * qty * (1 if side == "LONG" else -1)
                 fee = (entry + exit_price) * qty * 0.0005
+                pnl_source = "estimated"
         except Exception:
             if allow_estimate:
                 gross = (exit_price - entry) * qty * (1 if side == "LONG" else -1)
                 fee = (entry + exit_price) * qty * 0.0005
+                pnl_source = "estimated"
 
         # funding for the trade window: positive cash flow = received
         funding_cash = 0.0
@@ -1263,6 +1284,7 @@ class TradingEngine:
             "close_reason": reason, "gross_pnl": round(gross, 6),
             "fee_paid": round(fee, 6), "funding_paid": round(funding, 6),
             "net_pnl": round(net, 6), "r_multiple": round(r_multiple, 3),
+            "pnl_source": pnl_source,
         }
         await DB.update_trade(trade_id, patch)
         trade.update(patch)
@@ -1411,17 +1433,26 @@ class TradingEngine:
                 self.open_trades[int(row["id"])] = row
                 self.symbol_to_trade[row["symbol"]] = int(row["id"])
             else:
-                # the exchange has no such position → the trade closed while we were down
+                # The exchange has no such position → the trade closed while we
+                # were down.  Book ONLY what the exchange reported: real fills if
+                # they are still visible, otherwise an explicit 'unknown' with a
+                # zero P&L.  A journal must never invent money.
                 self.open_trades[int(row["id"])] = row
                 with contextlib.suppress(Exception):
-                    await self._finalize_close(
-                        int(row["id"]), self.hub.price(row["symbol"]) or row["entry_price"],
-                        reason="reconciled_missing", allow_estimate=False,
-                        reason_detail="position absent on exchange at startup")
+                    closed = await self._finalize_close(
+                        int(row["id"]), None, reason="reconciled_missing",
+                        allow_estimate=False,
+                        reason_detail="position absent on exchange at startup — "
+                                      "booked from the exchange record only")
+                    if closed and closed.get("pnl_source") == "unknown":
+                        self.log("warn", "trade-manager-bot",
+                                 f"{row['symbol']}: closed while the engine was offline and "
+                                 f"the fill history is gone — P&L recorded as unknown "
+                                 f"(excluded from win/loss until reviewed)")
                 if int(row["id"]) in self.open_trades:      # fallback if finalise bailed out
                     await DB.update_trade(int(row["id"]), {
                         "status": "closed", "close_reason": "reconciled_missing",
-                        "closed_at": now_ms()})
+                        "pnl_source": "unknown", "closed_at": now_ms()})
                     self.open_trades.pop(int(row["id"]), None)
                     self.symbol_to_trade.pop(row["symbol"], None)
                 self.log("warn", "info-verifier-bot",

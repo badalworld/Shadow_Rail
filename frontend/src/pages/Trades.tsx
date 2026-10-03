@@ -1,21 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Download, Filter, Search } from 'lucide-react'
 import { endpoints } from '../lib/api'
-import { useStore } from '../state/store'
+import { BOOT, useStore } from '../state/store'
 import { Chip, Panel, Stat, clock, dateTime, fmtMoney, fmtNum, fmtPct } from '../components/Glass'
 import { Bars, Donut, LineChart } from '../components/Charts'
 import type { Stats, Trade } from '../lib/types'
 
 export const Trades: React.FC = () => {
   const { stats, equity, pushToast } = useStore()
-  const [rows, setRows] = useState<Trade[]>([])
-  const [total, setTotal] = useState(0)
+  const [rows, setRows] = useState<Trade[]>(BOOT.closed_trades?.trades ?? [])
+  const [total, setTotal] = useState(BOOT.closed_trades?.total ?? 0)
   const [limit, setLimit] = useState(100)
   const [symbol, setSymbol] = useState('')
   const [result, setResult] = useState('')
   const [reason, setReason] = useState('')
   const [detail, setDetail] = useState<{ trade: Trade; events: any[] } | null>(null)
-  const [curve, setCurve] = useState<any>({ points: [], cumulative: [], by_day: [] })
+  const [curve, setCurve] = useState<any>({
+    points: [], cumulative: BOOT.curve ?? [], by_day: [],
+  })
   const [s, setS] = useState<Stats | null>(stats)
 
   const load = useCallback(async () => {
@@ -70,7 +72,9 @@ export const Trades: React.FC = () => {
   return (
     <div className="scroll-thin flex h-full min-h-0 flex-col gap-3 overflow-y-auto pr-0.5">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        <Stat label="Total Executed" value={s?.total_trades ?? 0} sub={`${s?.wins ?? 0}W / ${s?.losses ?? 0}L`} />
+        <Stat label="Total Executed" value={s?.total_trades ?? 0}
+          sub={`${s?.wins ?? 0}W / ${s?.losses ?? 0}L${s?.unreconciled
+            ? ` · ${s.unreconciled} unreconciled` : ''}`} />
         <Stat label="Win Rate" value={`${winRate.toFixed(1)}%`}
           tone={winRate >= 50 ? 'good' : 'warn'} sub={`PF ${(s?.profit_factor ?? 0).toFixed(2)}`} />
         <Stat label="Net P&L" value={fmtMoney(s?.net_pnl)} tone={(s?.net_pnl ?? 0) >= 0 ? 'good' : 'bad'}
@@ -188,6 +192,16 @@ export const Trades: React.FC = () => {
                         : r.close_reason === 'sl' ? 'var(--color-bear)'
                           : r.close_reason === 'reverse_signal' ? 'var(--color-cyan)' : 'var(--color-amber)',
                     }}>{r.close_reason?.replace(/_/g, ' ')}</span>
+                    {r.pnl_source && r.pnl_source !== 'fills' && (
+                      <span className="chip ml-1" title={
+                        r.pnl_source === 'unknown'
+                          ? 'The exchange reported no fills for this trade — P&L unknown, excluded from win rate'
+                          : 'P&L estimated from prices because the exchange reported no fills'
+                      } style={{
+                        fontSize: '0.55rem', padding: '0 0.3rem',
+                        color: 'var(--color-amber)', borderColor: 'var(--color-amber)',
+                      }}>{r.pnl_source === 'unknown' ? 'unreconciled' : 'estimated'}</span>
+                    )}
                   </td>
                   <td className="text-[0.62rem] dim">{dateTime(r.opened_at)}</td>
                   <td className="text-[0.62rem] dim">{dateTime(r.closed_at)}</td>

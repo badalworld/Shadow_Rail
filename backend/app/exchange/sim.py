@@ -171,6 +171,8 @@ class SimExchange:
         self._order_seq = 1000
         self._virtual_now = (now_ms() // self.bar_ms) * self.bar_ms
         self._last_funding_ms = self._virtual_now
+        # continuity across restarts (see export_state/import_state)
+        self._restore: dict | None = None
         self.filters: dict[str, SymbolFilter] = {}
         self._on_candle: Callable | None = None
         self._on_close: Callable | None = None
@@ -193,27 +195,49 @@ class SimExchange:
                 min_qty=step, min_notional=5.0, max_qty=max_qty, max_leverage=125,
                 quote="USDT", contract_type="PERPETUAL", status="TRADING")
 
+    def _advance(self, s: "SymbolState", prev_close: float) -> Candle:
+        """
+        One realistic bar: volatility regimes + an AR(1) momentum term.
+
+        A pure random walk punishes any trend-following strategy, so the
+        simulation would misrepresent the engine.  Real crypto has momentum
+        persistence and volatility clustering, which is what this models.
+        """
+        if self.rng.random() < 0.0015:                       # regime switch (~1/670 bars)
+            s.regime = self.rng.choice([0.7, 1.0, 1.0, 1.35, 1.8, 2.4])
+        # momentum: AR(1) with ~25-bar half life, plus rare shock impulses
+        s.drift = 0.97 * s.drift + 0.03 * self.rng.gauss(0, 1) * 0.55
+        if self.rng.random() < 0.002:
+            s.drift += self.rng.choice([-1, 1]) * self.rng.uniform(0.6, 2.2)
+        s.drift = max(-2.2, min(2.2, s.drift))
+        step = s.vol * s.regime * self.rng.gauss(0, 1)
+        drift = s.drift * s.vol * 0.55
+        o = prev_close
+        c = max(prev_close * 1e-6, prev_close * (1.0 + drift + step))
+        wick = abs(self.rng.gauss(0, 1)) * s.vol * s.regime * 0.8 * prev_close
+        hi = max(o, c) + wick
+        lo = max(1e-12, min(o, c) - abs(self.rng.gauss(0, 1)) * s.vol * s.regime * 0.8 * prev_close)
+        vol = s.volume * (0.4 + abs(self.rng.gauss(0, 1)))
+        return Candle(0, o, hi, lo, c, vol)
+
     def _seed_history(self) -> None:
         """Deterministic pre-history so indicators are warm on first scan."""
         for sym, s in self.syms.items():
             candles: list[Candle] = []
             price = s.price
             t = self._virtual_now - self.bar_ms * self.history_bars
-            trend = self.rng.gauss(0, 1)
+            s.drift = self.rng.gauss(0, 1) * 0.6
             for i in range(self.history_bars):
-                if i % 60 == 0:
-                    trend = self.rng.gauss(0, 1)
-                    s.regime = self.rng.choice([0.7, 1.0, 1.0, 1.35, 1.8])
-                step = s.vol * s.regime * (0.55 + 0.9 * abs(trend)) * self.rng.gauss(0, 1)
-                drift = trend * s.vol * 0.28
-                o = price
-                c = max(price * 1e-6, price * (1.0 + drift + step))
-                wick = abs(self.rng.gauss(0, 1)) * s.vol * 0.9 * price
-                hi = max(o, c) + wick
-                lo = max(1e-12, min(o, c) - abs(self.rng.gauss(0, 1)) * s.vol * 0.9 * price)
-                vol = s.volume * (0.4 + abs(self.rng.gauss(0, 1)))
-                candles.append(Candle(t + i * self.bar_ms, o, hi, lo, c, vol))
-                price = c
+                candle = self._advance(s, price)
+                candles.append(Candle(t + i * self.bar_ms, candle.o, candle.h,
+                                      candle.l, candle.c, candle.v))
+                price = candle.c
+            anchor = (self._restore or {}).get("end_prices", {}).get(sym)
+            if anchor and price > 0:
+                # keep the price series continuous with the previous run
+                k = float(anchor) / price
+                candles = [Candle(c.t, c.o * k, c.h * k, c.l * k, c.c * k, c.v) for c in candles]
+                price = float(anchor)
             s.price = price
             self.candles[sym] = candles
             self.tickers[sym] = Ticker(
@@ -221,6 +245,55 @@ class SimExchange:
                 quote_volume=s.volume * price, price_change_pct=0.0,
                 high=max(c.h for c in candles[-288:]), low=min(c.l for c in candles[-288:]),
                 mark=price, funding_rate=0.0001, updated_at=now_ms())
+
+    # ------------------------------------------------------- state continuity
+    def export_state(self) -> dict:
+        """Snapshot the paper account so a restart does not wipe the demo."""
+        return {
+            "balance": self.balance,
+            "start_balance": self.start_balance,
+            "virtual_now": self._virtual_now,
+            "order_seq": self._order_seq,
+            "realized_today": self.realized_today,
+            "fees_paid": self.fees_paid,
+            "funding_net": self.funding_net,
+            "end_prices": {sym: s.price for sym, s in self.syms.items()},
+            "positions": [
+                {"symbol": p.symbol, "side": p.side, "qty": p.qty, "entry": p.entry,
+                 "leverage": p.leverage, "margin_type": p.margin_type}
+                for p in self.positions.values()
+            ],
+            "orders": [
+                {"order_id": o.order_id, "symbol": o.symbol, "type": o.type,
+                 "side": o.side, "qty": o.qty, "price": o.price,
+                 "stop_price": o.stop_price, "reduce_only": o.reduce_only,
+                 "status": o.status, "created": o.created}
+                for o in self.orders.values() if o.status == "NEW"
+            ],
+        }
+
+    def import_state(self, state: dict) -> None:
+        """Restore a previous snapshot (call right after construction)."""
+        if not state:
+            return
+        self.balance = float(state.get("balance", self.balance))
+        self.start_balance = float(state.get("start_balance", self.start_balance))
+        self._order_seq = int(state.get("order_seq", self._order_seq))
+        self.realized_today = float(state.get("realized_today", 0.0))
+        self.fees_paid = float(state.get("fees_paid", 0.0))
+        self.funding_net = float(state.get("funding_net", 0.0))
+        for row in state.get("positions", []):
+            self.positions[row["symbol"]] = SimPosition(
+                symbol=row["symbol"], side=row["side"], qty=float(row["qty"]),
+                entry=float(row["entry"]), leverage=int(row.get("leverage", 10)),
+                margin_type=row.get("margin_type", "CROSS"))
+        for row in state.get("orders", []):
+            self.orders[row["order_id"]] = SimOrder(
+                order_id=row["order_id"], symbol=row["symbol"], type=row["type"],
+                side=row["side"], qty=float(row["qty"]), price=float(row.get("price") or 0),
+                stop_price=float(row.get("stop_price") or 0),
+                reduce_only=bool(row.get("reduce_only")), status=row.get("status", "NEW"),
+                created=int(row.get("created", 0)))
 
     # ---------------------------------------------------------- market data
     async def symbol_filters(self, symbol: str) -> SymbolFilter:
@@ -444,18 +517,8 @@ class SimExchange:
         for sym, s in self.syms.items():
             candles = self.candles[sym]
             prev_close = candles[-1].c if candles else s.price
-            if self.rng.random() < 0.015:
-                s.regime = self.rng.choice([0.7, 1.0, 1.2, 1.6, 2.2])
-            trend = s.drift
-            if self.rng.random() < 0.04:
-                s.drift = self.rng.gauss(0, 1) * 0.30
-            step = s.vol * s.regime * self.rng.gauss(0, 1)
-            o = prev_close
-            c = max(prev_close * 1e-6, prev_close * (1.0 + s.drift * s.vol + step))
-            wick = abs(self.rng.gauss(0, 1)) * s.vol * s.regime * 0.8 * prev_close
-            hi = max(o, c) + wick
-            lo = max(1e-12, min(o, c) - abs(self.rng.gauss(0, 1)) * s.vol * s.regime * 0.8 * prev_close)
-            vol = s.volume * (0.4 + abs(self.rng.gauss(0, 1)))
+            gen = self._advance(s, prev_close)
+            o, hi, lo, c, vol = gen.o, gen.h, gen.l, gen.c, gen.v
             candle = Candle(self._virtual_now, o, hi, lo, c, vol)
             candles.append(candle)
             if len(candles) > self.history_bars + 2000:
