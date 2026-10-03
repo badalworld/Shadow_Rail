@@ -110,7 +110,7 @@ backend/
       binance.py      USDT-M REST + websockets (orders, protection, user stream)
       sim.py          simulation exchange (offline demo & rehearsal)
       hub.py          MarketHub — candles, universe ranking, scanner allocation, health
-  tests/              52 tests covering every safety-critical rule
+  tests/              79 tests covering every safety-critical rule
 frontend/             React + TypeScript + Tailwind + three.js dashboard
 data/                 runtime state (git-ignored): config.json, journal, encrypted keys
 ```
@@ -134,6 +134,17 @@ exchange equity  =  starting balance + released P&L + unrealised − entry fees 
 A test (`test_equity_bridge_reconciles_with_the_exchange`) asserts that identity, and a
 regression test (`test_reconciliation_never_invents_pnl`) proves the journal can never
 fabricate a number when it restarts and finds a position gone.
+
+The journal is also checked against the **venue's own ledger**. `GET /api/reconcile`
+compares the net P&L booked from closed trades (minus the entry fees of positions that
+are still open) with the exchange income ledger — `REALIZED_PNL − COMMISSION +
+FUNDING_FEE` on Binance, the fill history on the simulator. The Main Page shows this as
+the *Ledger check* strip; the maintenance loop logs a warning the moment the two drift
+apart beyond rounding, so a mis-booked trade cannot hide.
+
+The paper account is snapshotted on every equity tick *and* on shutdown, and a restart
+re-adopts open positions, protective orders and prices, so cancelling a demo run never
+loses a trade (`test_restart_loses_nothing_from_the_paper_account`).
 
 ## Running offline
 

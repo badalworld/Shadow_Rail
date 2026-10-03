@@ -192,6 +192,9 @@ class TradingEngine:
         self.registry.publish_all(GOVERNOR.snapshot())
 
     async def stop(self) -> None:
+        # flush the paper account so nothing is lost between the last tick and now
+        with contextlib.suppress(Exception):
+            await self.hub.persist_sim_state()
         self.running = False
         for t in self.tasks:
             t.cancel()
@@ -382,10 +385,9 @@ class TradingEngine:
                            "margin_budget": round(self.journal.margin_budget(), 2)}
                 self.last_equity = payload
                 BUS.publish("equity.update", payload)
-                # keep the paper account durable across restarts (sim only)
-                self._persist_tick = getattr(self, "_persist_tick", 0) + 1
-                if self._persist_tick % 6 == 0:
-                    await self.hub.persist_sim_state()
+                # keep the paper account durable across restarts (sim only):
+                # every tick, so a restart can never lose a closed trade
+                await self.hub.persist_sim_state()
                 self.registry.set_status(
                     "equity-manager-bot", "working", "balance sync",
                     message=f"equity ${state.equity:,.2f} · "
@@ -1406,6 +1408,13 @@ class TradingEngine:
                 self.registry.set_status("maintenance-bot", "idle", "data normal",
                                          publish=False)
                 # model refresh from our own journal
+                drift = await self.reconcile_exchange()
+                if abs(drift.get("net_drift", 0.0)) > 1.0:
+                    self.log("warn", "trade-manager-bot",
+                             f"Journal vs exchange drift ${drift['net_drift']:+,.2f} "
+                             f"(journal {drift['journal_net']:,.2f} vs exchange "
+                             f"{drift['exchange_net']:,.2f}) — check recent fills",
+                             {"reconcile": drift})
                 if self.cycle and self.cycle % 20 == 0:
                     rows = await self.journal.feature_rows()
                     res = MODEL.train(rows)
@@ -1418,6 +1427,55 @@ class TradingEngine:
             except Exception as exc:
                 with contextlib.suppress(Exception):
                     self.log("warn", "maintenance-bot", f"maintenance error: {str(exc)[:160]}")
+
+    async def reconcile_exchange(self) -> dict[str, Any]:
+        """
+        Compare the journal against the exchange's own cash movements.
+
+        The journal is a *view* of the exchange; if the two disagree by more
+        than rounding, something was billed that we never booked (or vice
+        versa).  Live Binance accounts expose this through the income ledger.
+        """
+        closed = await DB.all_closed_for_stats()
+        journal_net = sum(float(r.get("net_pnl") or 0) for r in closed)
+        journal_fees = sum(abs(float(r.get("fee_paid") or 0)) for r in closed)
+        journal_funding = sum(float(r.get("funding_paid") or 0) for r in closed)
+        open_fees = sum(
+            abs(float(t.get("qty") or 0)) * float(t.get("entry_price") or 0) * 0.0005
+            for t in self.open_trades.values())
+        out: dict[str, Any] = {
+            "journal_net": round(journal_net, 4),
+            "journal_fees": round(journal_fees, 4),
+            "journal_funding_paid": round(journal_funding, 4),
+            "open_entry_fees": round(open_fees, 4),
+            "exchange_net": None,
+            "net_drift": 0.0,
+            "transport": self.hub.transport,
+        }
+        try:
+            totals = await self.hub.income_totals()
+        except Exception as exc:                       # pragma: no cover - transport gap
+            out["error"] = str(exc)[:160]
+            return out
+        if totals is None:
+            return out
+        exchange_net = float(totals.get("realized", 0.0)) - float(totals.get("fees", 0.0)) \
+            + float(totals.get("funding", 0.0))
+        out["exchange_net"] = round(exchange_net, 4)
+        out["exchange_fees"] = round(float(totals.get("fees", 0.0)), 4)
+        out["exchange_funding"] = round(float(totals.get("funding", 0.0)), 4)
+        # the journal books closed trades; the exchange books everything, so
+        # subtract what is still open (its entry fees are already paid)
+        expected = journal_net - open_fees
+        out["expected_from_journal"] = round(expected, 4)
+        out["net_drift"] = round(exchange_net - expected, 4)
+        # funding on *open* positions is billed by the venue before we close
+        # the trade, so allow a small proportional slack on top of the cent-level
+        # rounding tolerance.
+        tol = max(1.0, abs(out["exchange_net"]) * 0.001)
+        out["tolerance"] = round(tol, 4)
+        out["balanced"] = abs(out["net_drift"]) <= tol
+        return out
 
     def _note_blocked(self, bot_id: str, message: str) -> None:
         bot = self.registry.get(bot_id)

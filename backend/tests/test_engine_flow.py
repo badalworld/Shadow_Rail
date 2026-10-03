@@ -377,3 +377,54 @@ async def test_reconciliation_uses_real_fills_when_available(db, store):
     assert row["pnl_source"] == "fills"
     assert row["fee_paid"] > 0
     assert row["net_pnl"] != 0 or abs(row["gross_pnl"]) < 1e-6
+
+
+async def test_restart_loses_nothing_from_the_paper_account(db, store):
+    """Regression: the sim snapshot was written every 30s and never at shutdown,
+    so a restart forgot the last trades and the journal drifted from the venue."""
+    from app.exchange.hub import MarketHub
+
+    store.cfg.engine.universe_size = 12
+    store.cfg.binance.transport = "sim"
+    store.cfg.engine.sim_time_accel = 3000.0
+    store.save()
+
+    hub = MarketHub(store=store)
+    await hub.start()
+    await _set_price_engine(hub)
+    trade = await hub.market_order("BTCUSDT", "BUY", 0.01)
+    balance_before = hub.exchange.balance
+
+    # what the engine does on shutdown
+    assert await hub.persist_sim_state() is True
+    await hub.stop()
+
+    reborn = MarketHub(store=store)
+    await reborn.start()
+    assert reborn.exchange.balance == pytest.approx(balance_before, rel=1e-9)
+    assert "BTCUSDT" in reborn.exchange.positions
+    assert reborn.exchange.positions["BTCUSDT"].qty == pytest.approx(0.01)
+    await reborn.stop()
+
+
+async def test_journal_and_exchange_reconcile_after_a_trade_closes(db, store):
+    """The journal's net must equal the exchange ledger minus what is still open."""
+    eng = await make_engine(store, universe=12)
+    await _set_price(eng, "BTCUSDT", 100.0)
+    trade = await eng._open_trade("execution-1", make_opportunity("BTCUSDT", "LONG", 100.0, 2.0),
+                                  {"equity": 10_000.0, "available": 10_000.0, "open_count": 0})
+    assert trade
+    await _set_price(eng, "BTCUSDT", 101.0)
+    await eng._close_trade(int(trade["id"]), "reverse_signal")
+
+    rep = await eng.reconcile_exchange()
+    assert rep["exchange_net"] is not None
+    assert rep["balanced"], rep
+    assert abs(rep["net_drift"]) < 1.0
+
+
+async def _set_price_engine(hub) -> None:
+    """Nudge every symbol so the account has a live mark."""
+    for sym in list(hub.exchange.syms.keys()):
+        await hub.exchange.step_bar()
+        break

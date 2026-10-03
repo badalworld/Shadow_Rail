@@ -287,6 +287,12 @@ async def equity_curve(limit: int = 1200) -> dict:
             "by_day": await JOURNAL.pnl_by_day(30)}
 
 
+@app.get("/api/reconcile")
+async def reconcile() -> dict:
+    """Journal vs exchange cash ledger — the dashboard's honesty check."""
+    return await eng().reconcile_exchange()
+
+
 @app.get("/api/stats")
 async def stats() -> dict:
     return {"stats": await JOURNAL.refresh_stats(force=True),
@@ -464,8 +470,8 @@ async def indicator_selftest() -> dict:
     return res
 
 
-@app.get("/api/about")
-async def about() -> dict:
+async def about_payload() -> dict:
+    """Developer + project attribution (shared with the boot frame)."""
     return {
         "developer": DEV.model_dump(),
         "project": {
@@ -482,6 +488,11 @@ async def about() -> dict:
             "strategy": eng().risk.effective_exits(),
         },
     }
+
+
+@app.get("/api/about")
+async def about() -> dict:
+    return await about_payload()
 
 
 # ════════════════════════════════════════════════════════════════ websocket
@@ -557,6 +568,7 @@ async def boot_payload() -> dict[str, Any]:
             "closed_trades": {"trades": await DB.closed_trades(limit=100),
                               "total": await DB.count_closed()},
             "config": STORE.public_view(),
+            "about": await about_payload(),
             "ip": await ip_info(),
             "curve": await JOURNAL.cumulative_pnl(limit=400),
             "logs": await DB.query_logs(limit=80),

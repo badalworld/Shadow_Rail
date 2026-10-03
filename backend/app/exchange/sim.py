@@ -243,6 +243,14 @@ class SimExchange:
                 high=max(c.h for c in candles[-288:]), low=min(c.l for c in candles[-288:]),
                 mark=price, funding_rate=0.0001, updated_at=now_ms())
 
+    async def income_totals(self) -> dict:
+        """Everything this account has ever paid or earned (the cash ledger)."""
+        realized = sum(f.realized_pnl for f in self.fills
+                       if f.kind not in ("FUNDING_FEE",))
+        funding = sum(f.realized_pnl for f in self.fills if f.kind == "FUNDING_FEE")
+        return {"realized": realized, "fees": self.fees_paid, "funding": funding,
+                "fills": len(self.fills)}
+
     # ------------------------------------------------------- state continuity
     @staticmethod
     def _pick(obj: Any, *names: str) -> dict:

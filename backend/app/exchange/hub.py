@@ -46,6 +46,13 @@ class SymbolState:
 
 
 class MarketHub:
+    async def income_totals(self) -> dict | None:
+        """Exchange-side cash ledger totals (None when the venue can't report)."""
+        ex = self.exchange
+        if ex is None or not hasattr(ex, "income_totals"):
+            return None
+        return await ex.income_totals()
+
     # ------------------------------------------------------- sim persistence
     SIM_STATE_KEY = "sim_state_v1"
 

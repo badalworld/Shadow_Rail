@@ -249,3 +249,7 @@ frontend/node_modules/
 
 # typescript build cache
 *.tsbuildinfo
+
+# the generic python "lib/" rule above must not swallow dashboard source
+!frontend/src/lib/
+!frontend/src/lib/**

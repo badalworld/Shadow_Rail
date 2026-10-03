@@ -22,7 +22,7 @@ GET_ROUTES = [
     "/api/status", "/api/health", "/api/config", "/api/ip", "/api/equity",
     "/api/equity/curve", "/api/stats", "/api/trades/open", "/api/trades/closed",
     "/api/scan", "/api/bots", "/api/logs", "/api/events", "/api/about",
-    "/api/indicator/selftest",
+    "/api/indicator/selftest", "/api/reconcile",
 ]
 
 # numeric fields each page formats with toFixed()/math — a string here breaks the UI
@@ -226,3 +226,17 @@ def test_websocket_hello_frame_and_live_relay(client):
                 assert "name" in frame["data"] and "to" in frame["data"]
                 break
         assert "bot.promoted" in seen, f"promotion never reached the socket: {seen}"
+
+
+def test_routes_are_registered_before_the_spa_catch_all(client):
+    """Regression: /api/about was registered after the SPA catch-all inside the
+    static-mount block, so the catch-all answered 404 for it."""
+    from fastapi.routing import APIRoute
+
+    paths = [r.path for r in api.app.routes if isinstance(r, APIRoute)]
+    assert "/{full_path:path}" in paths
+    catch_all = paths.index("/{full_path:path}")
+    for route in GET_ROUTES:
+        assert route in paths, f"{route} is no longer registered"
+        assert paths.index(route) < catch_all, (
+            f"{route} is registered after the catch-all and will 404")

@@ -298,6 +298,32 @@ class BinanceFutures:
                             if r.get("incomeType") == "FUNDING_FEE" else r.get("incomeType", "TRADE")))
         return out
 
+    async def income_totals(self) -> dict | None:
+        """
+        Aggregate the income ledger Binance keeps for this account.
+
+        This is the ground truth the journal is reconciled against: realised
+        P&L, commissions and funding actually charged by the venue.
+        """
+        try:
+            rows = await self.income(limit=1000)
+        except Exception:
+            return None
+        realized = fees = funding = 0.0
+        for r in rows:
+            kind = (r.kind or "").upper()
+            amount = float(r.realized_pnl or 0.0)
+            if kind == "FUNDING_FEE":
+                funding += amount
+            elif kind in ("COMMISSION", "FEE"):
+                fees += abs(amount)
+            elif kind in ("REALIZED_PNL", "TRADE", ""):
+                realized += amount
+            else:
+                realized += amount
+        return {"realized": realized, "fees": fees, "funding": funding,
+                "rows": len(rows)}
+
     async def user_trades(self, symbol: str, start_ms: int | None = None,
                           limit: int = 500) -> list[Fill]:
         params: dict[str, Any] = {"symbol": symbol, "limit": limit}

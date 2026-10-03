@@ -1,12 +1,16 @@
 import React, { useEffect, useState } from 'react'
 import { Github, Mail, Send, Zap } from 'lucide-react'
 import { endpoints } from '../lib/api'
+import { BOOT } from '../state/store'
 import { Chip, Panel } from '../components/Glass'
 
 export const About: React.FC = () => {
-  const [data, setData] = useState<any>(null)
+  const [data, setData] = useState<any>(BOOT.about ?? null)
 
-  useEffect(() => { endpoints.about().then(setData).catch(() => {}) }, [])
+  useEffect(() => {
+    if (BOOT.about) return            // already hydrated at first paint
+    endpoints.about().then(setData).catch(() => {})
+  }, [])
 
   const dev = data?.developer || {}
   const project = data?.project || {}
@@ -55,7 +59,7 @@ export const About: React.FC = () => {
               ['bots', project.bots],
               ['timeframe', project.timeframe],
               ['htf filter', project.htf_filter],
-              ['api ceiling', `${project.api_budget_pct}%`],
+              ['api ceiling', project.api_budget_pct != null ? `${project.api_budget_pct}%` : '—'],
               ['mode', project.mode],
               ['transport', project.transport],
             ].map(([k, v]) => (

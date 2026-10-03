@@ -9,6 +9,7 @@ import { BotMap3D } from '../components/BotMap3D'
 import { endpoints } from '../lib/api'
 import { useStore } from '../state/store'
 import type { PageKey } from '../components/Layout'
+import type { Reconcile } from '../lib/types'
 
 const STAGES: { key: string; label: string; bots: string }[] = [
   { key: 'connector', label: 'Connector', bots: 'ORACLE' },
@@ -43,6 +44,7 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
   const { status, equity, stats, openTrades, bots, links, logs, scan, pulses, sos } = useStore()
   const [selected, setSelected] = useState<string | null>(null)
   const [curve, setCurve] = useState<{ x: number; y: number }[]>([])
+  const [ledger, setLedger] = useState<Reconcile | null>(null)
 
   // real equity curve (chronological), refreshed while the page is open
   useEffect(() => {
@@ -57,6 +59,20 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
     }
     load()
     const t = window.setInterval(load, 20_000)
+    return () => { alive = false; window.clearInterval(t) }
+  }, [])
+
+  // journal ↔ exchange ledger check (the accounting honesty strip)
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const res = await endpoints.reconcile()
+        if (alive) setLedger(res)
+      } catch { /* keep the previous verdict */ }
+    }
+    load()
+    const t = window.setInterval(load, 30_000)
     return () => { alive = false; window.clearInterval(t) }
   }, [])
 
@@ -127,6 +143,51 @@ export const Dashboard: React.FC<{ goTo?: (p: PageKey) => void }> = ({ goTo }) =
           sub={`${stats?.wins ?? 0}W / ${stats?.losses ?? 0}L · ${total} closed · PF ${fmtNum(stats?.profit_factor, 2)}`}
         />
       </div>
+
+      {/* ── ledger check: starting + released + unrealised − fees = equity ── */}
+      {equity && (
+        <Panel
+          title="Ledger check"
+          right={
+            <div className="flex items-center gap-2">
+              <Chip color={ledger && ledger.exchange_net != null
+                ? (ledger.balanced ? 'var(--color-bull)' : 'var(--color-bear)')
+                : 'var(--color-amber)'}>
+                {ledger && ledger.exchange_net != null
+                  ? (ledger.balanced ? 'venue reconciled' : 'drift detected')
+                  : 'venue ledger pending'}
+              </Chip>
+              <Chip>{ledger?.transport || status?.transport || 'sim'}</Chip>
+            </div>
+          }
+          bodyClass="p-2"
+        >
+          <div className="grid grid-cols-2 gap-2 px-1 md:grid-cols-4 xl:grid-cols-6">
+            <MiniStat label="Starting" value={fmtMoney(equity.starting_balance)} />
+            <MiniStat label="+ Released P&L" value={fmtMoney(equity.released_pnl)}
+              tone={(equity.released_pnl ?? 0) >= 0 ? 'bull' : 'bear'} />
+            <MiniStat label="+ Unrealised" value={fmtMoney(equity.unrealized)}
+              tone={(equity.unrealized ?? 0) >= 0 ? 'bull' : 'bear'} />
+            <MiniStat label="− Open entry fees" value={fmtMoney(-(equity.open_entry_fees ?? 0))} />
+            <MiniStat label="= Equity" value={fmtMoney(equity.equity)} />
+            <MiniStat
+              label={ledger && ledger.exchange_net != null ? 'Journal ↔ venue' : 'Equity bridge'}
+              value={ledger && ledger.exchange_net != null
+                ? `${(ledger.net_drift ?? 0) >= 0 ? '+' : ''}${fmtNum(ledger.net_drift, 4)}`
+                : fmtNum(equity.equity_bridge, 4)}
+              tone={ledger && ledger.exchange_net != null
+                ? (ledger.balanced ? 'bull' : 'bear')
+                : undefined}
+            />
+          </div>
+          <p className="px-1 pt-2 text-[0.65rem] dim">
+            Every closed trade is booked to the journal and re-checked against the venue's own
+            income ledger{ledger?.exchange_net != null
+              ? ` (realised ${fmtMoney(ledger.exchange_net)})`
+              : ''}. Drift above the tolerance raises a warning in the Log page.
+          </p>
+        </Panel>
+      )}
 
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1.55fr_1fr]">
         {/* ── 3D swarm ─────────────────────────────────────────────── */}
