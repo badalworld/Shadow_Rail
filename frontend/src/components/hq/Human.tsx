@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import type { Bot } from '../../lib/types'
 import { statusColor } from '../Glass'
 import {
-  PATROL, PELVIS_Y, buildSizes, type Detail, type HumanMode, type Look,
+  PATROL, PELVIS_Y, buildSizes, type Detail, type HumanMode, type Look, type WalkRoute,
 } from './layout'
 
 /**
@@ -33,6 +33,17 @@ const H = {
   shin: { r: 0.062, len: 0.30 },         // total 0.424
 }
 
+/* ── the commander's cigarette ─────────────────────────────────────────────
+   Eight wisps, each on its own slow lifetime: they drift up and outward while
+   the ember breathes, and a drag thickens the plume. */
+const PUFF_COUNT = 11
+const PUFFS = Array.from({ length: PUFF_COUNT }, (_, i) => ({
+  life: 3.4 + (i % 4) * 0.42,
+  offset: (i / PUFF_COUNT) * 3.4,
+  drift: 0.05 + (i % 3) * 0.022,
+  spin: i * 0.9,
+}))
+
 const armDrop = H.upperArm.len + H.upperArm.r * 2
 const foreDrop = H.foreArm.len + H.foreArm.r * 2
 const thighDrop = H.thigh.len + H.thigh.r * 2
@@ -55,7 +66,10 @@ export interface HumanProps {
   selected?: boolean
   hovered?: boolean
   label?: boolean
-  patrol?: boolean
+  /** walk the hall-wide patrol, or a route of this agent's own */
+  patrol?: boolean | WalkRoute
+  /** the commander's cigarette: ember, drag cycle and a drifting plume */
+  smoking?: boolean
   onSelect?: (botId: string) => void
   onHover?: (botId: string | null) => void
 }
@@ -63,7 +77,7 @@ export interface HumanProps {
 export const Human: React.FC<HumanProps> = ({
   bot, look, position, yaw, mode, working = false, handoff = 0, celebrateAt = 0,
   detail = 'balanced', shadows = true, selected = false, hovered = false,
-  label = true, patrol = false, onSelect, onHover,
+  label = true, patrol = false, smoking = false, onSelect, onHover,
 }) => {
   const rich = detail === 'cinematic'
   const mid = detail !== 'performance'
@@ -82,6 +96,8 @@ export const Human: React.FC<HumanProps> = ({
   const thighB = useRef<THREE.Group>(null!)
   const kneeA = useRef<THREE.Group>(null!)
   const kneeB = useRef<THREE.Group>(null!)
+  const ember = useRef<THREE.MeshBasicMaterial>(null!)
+  const puffRefs = useRef<(THREE.Mesh | null)[]>([])
   const [hover, setHover] = useState(false)
   useCursor(hover)
 
@@ -93,10 +109,11 @@ export const Human: React.FC<HumanProps> = ({
   const hipW = 0.35 * sizes.waist
   const coatW = chestW + 0.075 * sizes.chest
 
-  /* the patrol path, walked by the maintenance bot */
+  /* the walk route: the hall-wide patrol, or this agent's own loop */
   const route = useMemo(() => {
     if (!patrol) return null
-    const pts = PATROL.map(([x, z]) => new THREE.Vector3(x, 0, z))
+    const path = Array.isArray(patrol) ? patrol : PATROL
+    const pts = path.map(([x, y, z]) => new THREE.Vector3(x, y, z))
     const segs: { a: THREE.Vector3; b: THREE.Vector3; len: number }[] = []
     let total = 0
     for (let i = 0; i < pts.length - 1; i++) {
@@ -123,7 +140,7 @@ export const Human: React.FC<HumanProps> = ({
     const partying = t < celebrateUntil.current
 
     let py = PELVIS_Y[mode] * h
-    let sx = 0.02, hx = 0.0, hy = 0.0, spineZ = 0.0
+    let sx = 0.02, hx = 0.0, hy = 0.0, spineZ = 0.0, sRoll = 0.0
     let aX = 0, bX = 0, aZ = 0.09, bZ = -0.09, aF = -0.14, bF = -0.14
     let tA = 0, tB = 0, kA = 0, kB = 0
     let walkYaw: number | null = null
@@ -142,20 +159,23 @@ export const Human: React.FC<HumanProps> = ({
       }
       py += Math.sin(t * 1.5 + ph) * 0.006 * h
     } else if (mode === 'walk' && route) {
-      const speed = 0.85
+      // a man with a cigarette walks slower than a cleaner with a cart
+      const speed = smoking ? 0.5 : 0.85
+      const cadence = smoking ? 2.3 : 3.0
       let d = (t * speed + ph * 2) % route.total
       let seg = route.segs[0]
       for (const s of route.segs) { if (d <= s.len) { seg = s; break } d -= s.len }
       const k = seg.len > 0 ? d / seg.len : 0
       const x = seg.a.x + (seg.b.x - seg.a.x) * k
+      const y = seg.a.y + (seg.b.y - seg.a.y) * k
       const z = seg.a.z + (seg.b.z - seg.a.z) * k
       walkYaw = Math.atan2(seg.b.x - seg.a.x, seg.b.z - seg.a.z)
-      if (root.current) root.current.position.set(x, 0.02, z)
-      const step = Math.sin(t * 3.0 + ph)
+      if (root.current) root.current.position.set(x, y + 0.02, z)
+      const step = Math.sin(t * cadence + ph)
       tA = step * 0.46; tB = -step * 0.46
       kA = Math.max(0, -step) * 0.75; kB = Math.max(0, step) * 0.75
       aX = -step * 0.42; bX = step * 0.42
-      py += Math.abs(Math.sin(t * 3.0 + ph)) * 0.028 * h
+      py += Math.abs(Math.sin(t * cadence + ph)) * 0.028 * h
       hx = 0.04
     } else if (mode === 'celebrate') {
       py += Math.abs(Math.sin(t * 5.2 + ph)) * 0.13 * h
@@ -179,6 +199,32 @@ export const Human: React.FC<HumanProps> = ({
       if (working) { aX = -0.55; aF = -1.15; hy = Math.sin(t * 0.8) * 0.2 }
     }
 
+    /* ── the commander ──────────────────────────────────────────────────
+       A slow drag every few seconds: the cigarette hand rises to the mouth,
+       the head tips down, and the plume thickens.  Between drags the same arm
+       is held steady — never swinging with the walk — while the other hand
+       rides in a pocket and the shoulders roll. */
+    const dragCycle = 8.4
+    const dragPhase = (t + ph * 5) % dragCycle
+    const drag = smoking && dragPhase < 1.8
+      ? Math.sin((dragPhase / 1.8) * Math.PI)
+      : 0
+    if (smoking) {
+      aX = -0.26 - drag * 0.78
+      aZ = 0.30 + drag * 0.14
+      aF = -0.98 - drag * 0.5
+      bX = bX * 0.22 + 0.07
+      bZ = -0.19
+      bF = -1.78                                  // hand in the pocket
+      sRoll += Math.sin(t * 1.3 + ph) * 0.055     // shoulder roll
+      sx -= 0.045                                 // chin up, leaning back
+      hy = Math.sin(t * 0.27 + ph) * 0.55         // surveying the floor
+      hx -= drag * 0.12                           // down to the drag
+      if (walkYaw !== null && root.current) {
+        root.current.rotation.y = walkYaw + Math.sin(t * 0.85 + ph) * 0.07
+      }
+    }
+
     if (gesturing) { aX = -1.52; aF = -0.35; aZ = 0.3 }
     if (partying) {
       py += Math.abs(Math.sin(t * 5.2 + ph)) * 0.13 * h
@@ -189,7 +235,11 @@ export const Human: React.FC<HumanProps> = ({
 
     const breathe = 1 + Math.sin(t * 1.6 + ph) * 0.012
     if (pelvis.current) { pelvis.current.position.y = py; pelvis.current.scale.x = breathe }
-    if (spine.current) { spine.current.rotation.x = sx + spineZ; spine.current.rotation.y = Math.sin(t * 0.5 + ph) * 0.05 }
+    if (spine.current) {
+      spine.current.rotation.x = sx + spineZ
+      spine.current.rotation.y = Math.sin(t * 0.5 + ph) * 0.05
+      spine.current.rotation.z = sRoll
+    }
     if (head.current) { head.current.rotation.x = hx; head.current.rotation.y = hy + (gesturing ? 0.2 : 0) }
     if (neck.current) neck.current.rotation.x = hx * 0.35
     if (armA.current) { armA.current.rotation.x = aX; armA.current.rotation.z = aZ }
@@ -202,7 +252,31 @@ export const Human: React.FC<HumanProps> = ({
     if (kneeA.current) kneeA.current.rotation.x = kA
     if (kneeB.current) kneeB.current.rotation.x = kB
     if (root.current && walkYaw === null) root.current.rotation.y = yaw
-    if (root.current && walkYaw !== null) root.current.rotation.y = walkYaw
+    if (root.current && walkYaw !== null && !smoking) root.current.rotation.y = walkYaw
+
+    /* ── the cigarette: a breathing ember and eight wisps of smoke ────── */
+    if (smoking && ember.current) {
+      const heat = 0.62 + Math.abs(Math.sin(t * 2.35 + ph)) * 0.2 + drag * 0.45
+      ember.current.color.setRGB(1, 0.34 + heat * 0.24, 0.08 + heat * 0.12)
+      ember.current.opacity = 0.75 + heat * 0.25
+    }
+    if (smoking && mid) {
+      for (let i = 0; i < PUFF_COUNT; i++) {
+        const puff = puffRefs.current[i]
+        if (!puff) continue
+        const spec = PUFFS[i]
+        const age = ((t + spec.offset) % spec.life) / spec.life
+        puff.position.set(
+          Math.sin(age * 4.1 + spec.spin) * spec.drift * (0.35 + age),
+          age * (0.66 + drag * 0.3),
+          Math.cos(age * 3.2 + spec.spin) * spec.drift * 0.6 * (0.35 + age),
+        )
+        puff.scale.setScalar(0.55 + age * 3.1)
+        const fade = age < 0.14 ? age / 0.14 : 1 - (age - 0.14) / 0.86
+        const mat = puff.material as THREE.MeshBasicMaterial
+        mat.opacity = Math.max(0, fade) * (0.42 + drag * 0.34)
+      }
+    }
   })
 
   /* ── materials ─────────────────────────────────────────────────────── */
@@ -285,6 +359,23 @@ export const Human: React.FC<HumanProps> = ({
                 <meshStandardMaterial color={accent} roughness={0.5} transparent opacity={0.5} />
               </mesh>
             </>
+          )}
+
+          {/* the plume: wisps drift up past the smoking shoulder, left behind
+              as he walks — the classic trail of a man with a cigarette */}
+          {smoking && mid && (
+            <group position={[H.shoulderX * sizes.shoulder + 0.06,
+                              H.shoulderY + 0.34, 0.10]}>
+              {PUFFS.map((spec, i) => (
+                <mesh key={i}
+                  ref={(el) => { puffRefs.current[i] = el }}
+                  scale={0.5} renderOrder={4}>
+                  <sphereGeometry args={[0.042, 8, 8]} />
+                  <meshBasicMaterial color="#c9d6e4" transparent opacity={0}
+                    depthWrite={false} toneMapped={false} />
+                </mesh>
+              ))}
+            </group>
           )}
 
           {/* neck + head */}
@@ -402,6 +493,29 @@ export const Human: React.FC<HumanProps> = ({
                     <torusGeometry args={[0.042, 0.008, 8, 18]} />
                     <meshPhysicalMaterial color={accent} metalness={0.85} roughness={0.2} />
                   </mesh>
+                )}
+
+                {/* ── the commander's cigarette ──────────────────────────
+                    Held between the fingers, tilted forward; the ember glows
+                    and breathes, and its own faint light warms the hand. */}
+                {smoking && (
+                  <group position={[0, -0.055, 0.045]} rotation={[1.28, 0, 0.12]}>
+                    <mesh position={[0, 0.024, 0]}>
+                      <cylinderGeometry args={[0.0055, 0.0068, 0.086, 8]} />
+                      <meshStandardMaterial color="#f3ead9" roughness={0.88} />
+                    </mesh>
+                    <mesh position={[0, 0.062, 0]}>
+                      <cylinderGeometry args={[0.0072, 0.0072, 0.014, 8]} />
+                      <meshStandardMaterial color="#6b5a4a" roughness={0.95} />
+                    </mesh>
+                    <mesh position={[0, 0.075, 0]}>
+                      <sphereGeometry args={[0.0092, 10, 10]} />
+                      <meshBasicMaterial ref={ember} color="#ff7a2f" toneMapped={false}
+                        transparent opacity={0.95} />
+                    </mesh>
+                    <pointLight position={[0, 0.088, 0]} color="#ff8a3a"
+                      intensity={0.9} distance={1.7} decay={2} />
+                  </group>
                 )}
               </group>
             </group>

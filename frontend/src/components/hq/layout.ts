@@ -199,6 +199,8 @@ export interface Seat {
   station: StationKey
   /** desk anchor: where the furniture goes + how it is rotated */
   furniture?: { kind: 'desk' | 'console' | 'podium' | 'gate' | 'wall' | 'vault'; yaw: number }
+  /** walk seats may carry their own route instead of the hall-wide patrol */
+  route?: WalkRoute
 }
 
 const DESK_FACE = Math.PI / 2          // scanners face the room centre (+x → yaw 90°)
@@ -218,8 +220,11 @@ export function seatsFor(bots: Bot[]): Seat[] {
   const core = byGroup('core')
   core.forEach((b) => {
     if (b.bot_id === 'ceo-bot') {
-      out.push({ id: b.bot_id, position: [0, 0.36, 4.5], yaw: Math.PI, mode: 'stand',
-        station: 'command', furniture: { kind: 'podium', yaw: 0 } })
+      // the commander works the dais: walking his ring, smoking, watching the
+      // floor — the podium stays where he left it
+      out.push({ id: b.bot_id, position: [DAIS.x, DAIS.y, DAIS.z + 3.4], yaw: Math.PI,
+        mode: 'walk', station: 'command', route: DAIS_ROUTE,
+        furniture: { kind: 'podium', yaw: 0 } })
     } else if (b.bot_id === 'maintenance-bot') {
       out.push({ id: b.bot_id, position: [-3.4, 0.02, 10.6], yaw: Math.PI, mode: 'walk',
         station: 'command' })
@@ -300,10 +305,35 @@ export function seatsFor(bots: Bot[]): Seat[] {
 }
 
 /** The patrol route for the maintenance bot (a closed loop through the hall). */
-export const PATROL: [number, number][] = [
-  [-3.4, 10.6], [-14.5, 10.6], [-20.0, 1.0], [-14.5, -10.5], [-4.0, -12.0],
-  [8.0, -12.4], [16.5, 0.0], [8.0, 11.0], [-3.4, 10.6],
+/** A walk route: world-space [x, y, z] way-points, closed by repeating the first. */
+export type WalkRoute = [number, number, number][]
+
+/** the maintenance bot's rounds — the whole hall, on the floor */
+export const PATROL: WalkRoute = [
+  [-3.4, 0, 10.6], [-14.5, 0, 10.6], [-20.0, 0, 1.0], [-14.5, 0, -10.5],
+  [-4.0, 0, -12.0], [8.0, 0, -12.4], [16.5, 0, 0.0], [8.0, 0, 11.0],
+  [-3.4, 0, 10.6],
 ]
+
+/** The dais stands 0.38 m proud of the floor at (0, 6) with a 5.4 m top. */
+export const DAIS = { x: 0, z: 6, y: 0.38, radius: 5.4 }
+
+/**
+ * The CEO's own loop: a slow ring around the command dais, clear of the
+ * podium and of the two operator consoles.  Its radius keeps the commander on
+ * the platform while he smokes his way through the workflow.
+ */
+export const DAIS_ROUTE: WalkRoute = (() => {
+  const out: WalkRoute = []
+  const n = 14
+  const rx = 4.35, rz = 4.15
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2
+    out.push([DAIS.x + Math.sin(a) * rx, DAIS.y, DAIS.z + Math.cos(a) * rz])
+  }
+  out.push(out[0])
+  return out
+})()
 
 /** Hip-joint height per pose, chosen so the shoes actually touch the floor:
  *  the leg chain (thigh 0.452 + shin + shoe) drops 0.937, and a seated hip sits

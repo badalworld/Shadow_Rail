@@ -656,7 +656,8 @@ const Scene: React.FC<HQProps & {
             working={working} handoff={handoffs[bot.bot_id] || 0} detail={detail}
             shadows={rich} selected={selected === bot.bot_id}
             hovered={hover === bot.bot_id} label={label}
-            patrol={s.mode === 'walk' ? mid : false}
+            patrol={s.mode === 'walk' ? (mid ? (s.route ?? true) : false) : false}
+            smoking={s.id === 'ceo-bot'}
             onSelect={(id) => { onSelect?.(id); onFocus?.(botStation[id] || station) }}
             onHover={setHover}
           />
