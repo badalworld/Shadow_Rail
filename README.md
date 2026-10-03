@@ -255,6 +255,14 @@ workflow, and the agents in it are the bots that own that stage:
 * **Rendering quality** — *cinema / balanced / speed*, remembered per browser under
   `shadow-rail.hq.detail`; *speed* drops reflections, shadows and geometry detail for older
   laptops.  The node-graph view from earlier builds is still there as the **swarm map** toggle.
+* **The floor is lit to be read** — *every* station view is kept visible on purpose, so no part of
+  the room is a black silhouette: exposure (`toneMappingExposure`) sits at `1.16` (lowered to
+  `1.02` when the connector is in SOS), ambient + hemisphere + two directionals fill the hall,
+  five of the nine ceiling bars carry real point lights, each station has one accent-tinted light
+  above it, and the shell uses `#1d2635` walls, a `#232c3c`/`#374660` furniture palette, `#28344a`
+  suits and a `#2d3a4d` floor grid, with a ledge and truss so the room has edges instead of an
+  empty sky.  Station cameras were re-aimed to ~20 m so a zone fits the frame whole.  The floor grid
+  is architectural only — `ui:check` asserts it is never fed trade or equity data.
 * **Notifications are transient** — the win/loss banner and the toasts live exactly
   `NOTIFY_MS = 3000` ms (see `frontend/src/state/store.tsx`), so the floor is never covered for
   long.  `npm run ui:check` asserts that rule against the source, because minification would hide

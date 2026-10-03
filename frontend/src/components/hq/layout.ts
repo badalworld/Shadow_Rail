@@ -39,37 +39,37 @@ export const STATIONS: Station[] = [
   {
     key: 'command', label: 'Command Deck', group: 'core', stage: 'connector',
     accent: '#22d3ee',
-    cam: { pos: [0, 6.4, 19], target: [0, 2.7, 5.0] },
+    cam: { pos: [0, 8.6, 26.0], target: [0, 2.6, 4.0] },
   },
   {
     key: 'scan', label: 'Scanner Bay', group: 'scanner', stage: 'scan',
     accent: '#00e5a8',
-    cam: { pos: [-8.5, 5.4, 0.5], target: [-18, 1.7, -6] },
+    cam: { pos: [-2.5, 7.6, 8.4], target: [-18, 1.9, -8] },
   },
   {
     key: 'analyze', label: 'Analyst Wing', group: 'analyst', stage: 'analyze',
     accent: '#38bdf8',
-    cam: { pos: [4.5, 6.2, 4.5], target: [9.5, 1.7, -9] },
+    cam: { pos: [-5.5, 8.6, 10.0], target: [9.5, 1.7, -8] },
   },
   {
     key: 'execute', label: 'Execution Pods', group: 'execution', stage: 'execute',
     accent: '#fbbf24',
-    cam: { pos: [-2.2, 4.4, 3.6], target: [-9.2, 1.6, 3.4] },
+    cam: { pos: [9.0, 8.0, 12.5], target: [-9.2, 1.6, 3.4] },
   },
   {
     key: 'verify', label: 'Verification Gate', group: 'verify', stage: 'verify',
     accent: '#a78bfa',
-    cam: { pos: [1.2, 4.0, 5.6], target: [0.4, 2.0, -3.2] },
+    cam: { pos: [3.3, 8.4, 15.6], target: [0.4, 2.0, -3.2] },
   },
   {
     key: 'monitor', label: 'Monitor Wall', group: 'monitor', stage: 'monitor',
     accent: '#f472b6',
-    cam: { pos: [11.5, 5.6, -3.5], target: [19.4, 2.4, -6.2] },
+    cam: { pos: [3.5, 8.6, 6.0], target: [19.4, 2.4, -6.2] },
   },
   {
     key: 'finance', label: 'Vault & Ledger', group: 'finance', stage: 'close',
     accent: '#34d399',
-    cam: { pos: [-11, 6.0, 4.5], target: [-18.6, 2.3, 4.0] },
+    cam: { pos: [-1.5, 9.2, 13.2], target: [-18.6, 2.3, 4.0] },
   },
 ]
 
@@ -110,10 +110,10 @@ const SKIN = ['#f4d6bd', '#eec3a1', '#dda87c', '#c9905f', '#b4794c', '#96603a',
   '#7a4c2c', '#5d3a22', '#f7e0cb', '#e0b48c']
 const HAIR = ['#171310', '#241a12', '#33210f', '#4a3218', '#6b4a24', '#a3723c',
   '#c49a5f', '#8f8f8f', '#e6e3dc', '#2c2320']
-const SUIT = ['#141a24', '#1b2230', '#222a38', '#2a3140', '#0f1725', '#2d3444',
-  '#1d2733', '#333a48']
+const SUIT = ['#28344a', '#33405a', '#3c4a66', '#465372', '#2b3850', '#4d5c7a',
+  '#37455f', '#556684']
 const SHIRT = ['#eef2f7', '#e2e9f2', '#d3dce8', '#f6f8fb', '#cfd9e6']
-const SHOE = ['#0a0c11', '#15181f', '#241d16', '#101317']
+const SHOE = ['#1d222c', '#2a2f3a', '#3a2f22', '#232833']
 
 /** Deterministic pseudo-random from a bot id — the same agent always looks the same. */
 function hash(seed: string): () => number {

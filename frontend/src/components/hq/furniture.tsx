@@ -14,60 +14,75 @@ import { ROOM } from './layout'
  * still renders in a few hundred draw calls.
  */
 
-const METAL = { color: '#2a3140', metalness: 0.85, roughness: 0.35 }
-const DARK = { color: '#12161f', metalness: 0.6, roughness: 0.45 }
-const LAMINATE = { color: '#1b2230', metalness: 0.25, roughness: 0.55 }
+const METAL = { color: '#4b586e', metalness: 0.5, roughness: 0.42 }
+const DARK = { color: '#232c3c', metalness: 0.34, roughness: 0.6 }
+const LAMINATE = { color: '#374660', metalness: 0.12, roughness: 0.6 }
 
 /* ─────────────────────────────── room shell ────────────────────────────── */
 
 export const Room: React.FC<{ quality: 'cinematic' | 'balanced' | 'performance'; night: boolean }> =
   ({ quality, night }) => {
     const { halfX, halfZ } = ROOM
-    const wall = night ? '#0b1018' : '#101725'
+    const wall = night ? '#1d2635' : '#263242'
     const parapet = 3.6                      // side walls stay low so the floor is
     const floor = quality === 'cinematic'    // always visible from outside
       ? (
         <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
           <planeGeometry args={[halfX * 2, halfZ * 2]} />
           <MeshReflectorMaterial
-            resolution={512} mixBlur={1.1} mixStrength={2.4} blur={[320, 70]}
-            mirror={0.42} depthScale={1.1} minDepthThreshold={0.4}
-            maxDepthThreshold={1.35} color="#0a0f18" metalness={0.62} roughness={0.82} />
+            resolution={512} mixBlur={1.1} mixStrength={1.5} blur={[320, 70]}
+            mirror={0.3} depthScale={1.1} minDepthThreshold={0.4}
+            maxDepthThreshold={1.35} color="#1e2839" metalness={0.55} roughness={0.72} />
         </mesh>
       )
       : (
         <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
           <planeGeometry args={[halfX * 2, halfZ * 2]} />
-          <meshStandardMaterial color="#0b111b" metalness={0.45} roughness={0.55} />
+          <meshStandardMaterial color="#2d3a4d" metalness={0.28} roughness={0.58} />
         </mesh>
       )
     return (
       <group>
+        {/* the surrounding apron: a hall floating in space reads as a mistake,
+            so the world continues past the floor and fades into the fog */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.04, 0]}>
+          <planeGeometry args={[320, 320]} />
+          <meshStandardMaterial color="#141d31" metalness={0.2} roughness={0.92} />
+        </mesh>
+        <gridHelper args={[300, 75, '#33506e', '#24354f']} position={[0, -0.02, 0]}
+          material-transparent material-opacity={0.3} />
         {floor}
+        {/* grid: the floor reads as a lit trading hall, not a black void */}
+        <gridHelper args={[halfX * 2, 24, '#6fa8c9', '#3c5170']} position={[0, 0.02, 0]}
+          material-transparent material-opacity={0.5} />
+        {/* floor glow strips front and back */}
         {/* the back wall carries the big board + the video wall; the sides are
             parapets with an LED rail, so the hall reads as closed without a lid
             that would hide the floor from an outside camera */}
         <mesh position={[0, 5, -halfZ]} receiveShadow>
           <boxGeometry args={[halfX * 2, 10, 0.3]} />
-          <meshStandardMaterial color={wall} metalness={0.35} roughness={0.72} />
+          <meshStandardMaterial color={wall} metalness={0.12} roughness={0.82} />
+        </mesh>
+        <mesh position={[0, 1.15, -halfZ + 0.22]}>
+          <boxGeometry args={[halfX * 2 - 2.4, 0.07, 0.07]} />
+          <meshStandardMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={1.1} />
         </mesh>
         {[halfX, -halfX].map((x) => (
           <group key={x}>
             <mesh position={[x, parapet / 2, 0]} receiveShadow>
               <boxGeometry args={[0.3, parapet, halfZ * 2]} />
-              <meshStandardMaterial color={wall} metalness={0.35} roughness={0.72} />
+              <meshStandardMaterial color={wall} metalness={0.12} roughness={0.82} />
             </mesh>
             <mesh position={[x, parapet + 0.04, 0]}>
               <boxGeometry args={[0.14, 0.07, halfZ * 2 - 0.4]} />
-              <meshStandardMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={0.6} />
+              <meshStandardMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={1.6} />
             </mesh>
           </group>
         ))}
-        {/* floor glow strips front and back */}
         {[-halfZ + 0.2, halfZ - 0.2].map((z) => (
           <mesh key={z} position={[0, 0.06, z]}>
             <boxGeometry args={[halfX * 2 - 1, 0.06, 0.08]} />
-            <meshStandardMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={0.5} />
+            <meshStandardMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={1.4} />
           </mesh>
         ))}
       </group>
@@ -77,20 +92,48 @@ export const Room: React.FC<{ quality: 'cinematic' | 'balanced' | 'performance';
 /** Hanging truss over the hall: beams carry the light bars. */
 export const Truss: React.FC = () => {
   const y = ROOM.height - 0.24
-  const cross: number[] = [-2, -5.5, -9, -12.5]
-  const long: number[] = [-3, 0, 3]
+  const cross: number[] = [-14.4, -9.6, -4.8, 0, 4.8, 9.6, 14.4]
+  const long: number[] = [-22.8, -11.4, 0, 11.4, 22.8]
+  const ring = ROOM.height - 0.12
   return (
     <group position={[0, y, 0]}>
+      {/* corner columns: the roof frame needs something to stand on */}
+      {[[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([sx, sz]) => (
+        <group key={`col${sx}${sz}`}
+          position={[sx * (ROOM.halfX - 0.35), -(y - ROOM.height / 2), sz * (ROOM.halfZ - 0.35)]}>
+          <mesh castShadow receiveShadow>
+            <boxGeometry args={[0.55, ROOM.height, 0.55]} />
+            <meshStandardMaterial color="#3a465c" metalness={0.45} roughness={0.5} />
+          </mesh>
+          <mesh position={[0, 0, 0.29]}>
+            <boxGeometry args={[0.08, ROOM.height - 0.6, 0.05]} />
+            <meshStandardMaterial color="#22d3ee" emissive="#22d3ee" emissiveIntensity={0.5} />
+          </mesh>
+        </group>
+      ))}
+      {/* perimeter beam ring that ties the columns and the truss together */}
+      {[-1, 1].map((sz) => (
+        <mesh key={`rz${sz}`} position={[0, ring - y, sz * (ROOM.halfZ - 0.1)]}>
+          <boxGeometry args={[ROOM.halfX * 2, 0.34, 0.34]} />
+          <meshStandardMaterial color="#38445a" metalness={0.45} roughness={0.5} />
+        </mesh>
+      ))}
+      {[-1, 1].map((sx) => (
+        <mesh key={`rx${sx}`} position={[sx * (ROOM.halfX - 0.1), ring - y, 0]}>
+          <boxGeometry args={[0.34, 0.34, ROOM.halfZ * 2]} />
+          <meshStandardMaterial color="#38445a" metalness={0.45} roughness={0.5} />
+        </mesh>
+      ))}
       {cross.map((z) => (
         <mesh key={`c${z}`} position={[0, 0, z]}>
           <boxGeometry args={[ROOM.halfX * 2 - 0.6, 0.16, 0.16]} />
-          <meshStandardMaterial color="#151b26" metalness={0.7} roughness={0.4} />
+          <meshStandardMaterial color="#2b3547" metalness={0.5} roughness={0.45} />
         </mesh>
       ))}
       {long.map((x) => (
         <mesh key={`l${x}`} position={[x, 0.02, 0]}>
           <boxGeometry args={[0.12, 0.12, ROOM.halfZ * 2 - 0.6]} />
-          <meshStandardMaterial color="#151b26" metalness={0.7} roughness={0.4} />
+          <meshStandardMaterial color="#2b3547" metalness={0.5} roughness={0.45} />
         </mesh>
       ))}
     </group>
@@ -98,30 +141,37 @@ export const Truss: React.FC = () => {
 }
 
 /** Hanging light bars, suspended from the truss. */
-export const CeilingLights: React.FC<{ night: boolean }> = ({ night }) => {
+export const CeilingLights: React.FC<{ night: boolean; lights?: boolean }> =
+  ({ night, lights = true }) => {
   const bars = useMemo(() => {
     const out: [number, number][] = []
     for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) out.push([i * 13, j * 8])
     return out
   }, [])
-  const intensity = night ? 0.5 : 1.0
+  const glow = night ? 1.6 : 3.0
   return (
     <group position={[0, ROOM.height - 0.5, 0]}>
       {bars.map(([x, z]) => (
         <group key={`${x}-${z}`} position={[x, 0, z]}>
           <mesh position={[0, 0.32, 0]}>
             <boxGeometry args={[0.05, 0.44, 0.05]} />
-            <meshStandardMaterial color="#1b2330" metalness={0.7} roughness={0.4} />
+            <meshStandardMaterial color="#2c3546" metalness={0.5} roughness={0.45} />
           </mesh>
           <mesh castShadow={false}>
             <boxGeometry args={[5.4, 0.12, 0.5]} />
-            <meshStandardMaterial color="#0e131c" metalness={0.6} roughness={0.5} />
+            <meshStandardMaterial color="#1a2230" metalness={0.5} roughness={0.5} />
           </mesh>
           <mesh position={[0, -0.085, 0]}>
             <boxGeometry args={[5.0, 0.04, 0.36]} />
-            <meshStandardMaterial color="#dff6ff" emissive="#cfefff"
-              emissiveIntensity={intensity} toneMapped={false} />
+            <meshStandardMaterial color="#f2fbff" emissive="#eaf7ff"
+              emissiveIntensity={glow} toneMapped={false} />
           </mesh>
+          {/* five of the nine bars are actual lights, so the hall is lit and not
+              merely decorated — the rest stay emissive to keep the light count sane */}
+          {lights && (Math.abs(x) < 1 || Math.abs(z) < 1) && (
+            <pointLight position={[0, -1.0, 0]} color="#eaf4ff"
+              intensity={night ? 26 : 50} distance={28} decay={2} />
+          )}
         </group>
       ))}
     </group>
@@ -135,7 +185,7 @@ const Screen: React.FC<{
   color?: string
   intensity?: number
   pulse?: boolean
-}> = ({ size = [0.62, 0.36], color = '#22d3ee', intensity = 0.9, pulse = false }) => {
+}> = ({ size = [0.62, 0.36], color = '#22d3ee', intensity = 1.7, pulse = false }) => {
   const ref = useRef<THREE.MeshStandardMaterial>(null!)
   useFrame(({ clock }) => {
     if (!pulse || !ref.current) return
@@ -146,7 +196,7 @@ const Screen: React.FC<{
     <group>
       <mesh>
         <boxGeometry args={[size[0] + 0.04, size[1] + 0.04, 0.028]} />
-        <meshStandardMaterial color="#080b11" metalness={0.7} roughness={0.35} />
+        <meshStandardMaterial color="#0d1320" metalness={0.5} roughness={0.4} />
       </mesh>
       <mesh position={[0, 0, 0.018]}>
         <planeGeometry args={size} />
@@ -406,7 +456,7 @@ export const Gate: React.FC<{
       ))}
       <mesh position={[0, 3.3, 0]}>
         <boxGeometry args={[3.5, 0.24, 0.5]} />
-        <meshStandardMaterial color="#101623" metalness={0.8} roughness={0.28} />
+        <meshStandardMaterial color="#243047" metalness={0.6} roughness={0.35} />
       </mesh>
       <mesh ref={curtain} position={[0, 1.7, 0]}>
         <planeGeometry args={[2.6, 3.1]} />

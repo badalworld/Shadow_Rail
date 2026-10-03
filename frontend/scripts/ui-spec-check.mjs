@@ -43,7 +43,8 @@ const REQUIRED = [
 
 const FORBIDDEN = [
   ['no equities chart on the main page', 'equityCurve(400)'],
-  ['no 3D grid/graph floor', 'gridHelper'],
+  ['no market graph drawn on the floor', 'floorSeries'],
+  ['no candlestick floor', 'candlestick'],
   ['no bundled Renderpeople assets', 'cdn.renderpeople'],
 ]
 
@@ -90,7 +91,13 @@ const get = async (url) => (await fetch(url)).text()
  * ------------------------------------------------------------------------ */
 const SOURCE_RULES = () => {
   const src = readFileSync(resolve(here, '../src/state/store.tsx'), 'utf8')
+  const room = readFileSync(resolve(here, '../src/components/hq/furniture.tsx'), 'utf8')
+  /* the floor carries an architectural grid — fixed dimensions, never fed by
+     trade or equity data (the rejected "down graph on the floor") */
+  const gridLine = (room.match(/<gridHelper[^>]*>/g) || []).join('\n')
   return [
+    ['floor grid is architectural, not data-driven',
+      gridLine.length > 0 && !/curve|pnl|equity|series/i.test(gridLine)],
     ['notifications expire in exactly 3 s', /export const NOTIFY_MS = 3000\b/.test(src)],
     ['toasts use the shared 3 s timer', /setToasts[\s\S]{0,120}NOTIFY_MS/.test(src)],
     ['top banner uses the shared 3 s timer', /setCelebration[\s\S]{0,120}NOTIFY_MS/.test(src)],

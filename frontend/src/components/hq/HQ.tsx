@@ -173,7 +173,21 @@ const Board: React.FC<{
 
 /* ─────────────────────────────── camera rig ────────────────────────────── */
 
-const OVERVIEW = { pos: [0, 14.5, 32] as [number, number, number], target: [0, 2.4, 2] as [number, number, number] }
+const OVERVIEW = { pos: [0, 13.8, 33.5] as [number, number, number], target: [0, 2.7, -2] as [number, number, number] }
+
+/**
+ * ACES tone mapping renders our dark palette very dark.  Lift the exposure so
+ * the floor, the desks and the agents are readable at a glance.
+ */
+const Exposure: React.FC<{ value: number }> = ({ value }) => {
+  const gl = useThree((st) => st.gl)
+  useEffect(() => {
+    const prev = gl.toneMappingExposure
+    gl.toneMappingExposure = value
+    return () => { gl.toneMappingExposure = prev }
+  }, [gl, value])
+  return null
+}
 
 const CameraRig: React.FC<{ focus: StationKey | null }> = ({ focus }) => {
   const camera = useThree((s) => s.camera)
@@ -484,37 +498,52 @@ const Scene: React.FC<HQProps & {
 
   return (
     <>
-      <fog attach="fog" args={[danger ? '#180508' : '#050810', 30, 108]} />
-      <color attach="background" args={[danger ? '#0b0406' : '#04060c']} />
+      <fog attach="fog" args={[danger ? '#1c0509' : '#0a1220', 46, 145]} />
+      <color attach="background" args={[danger ? '#12060a' : '#0a1322']} />
+      <Exposure value={danger ? 1.02 : 1.16} />
       <group>
 
       {/* ── light rig ─────────────────────────────────────────────── */}
-      <ambientLight intensity={danger ? 0.3 : mid ? 0.42 : 0.3} color={danger ? '#ffd5d5' : '#cfe4ff'} />
-      <hemisphereLight intensity={mid ? 0.5 : 0.3} color="#8fd8ff" groundColor="#0a1622" />
+      <ambientLight intensity={danger ? 0.5 : mid ? 0.78 : 0.6} color={danger ? '#ffd5d5' : '#dceaff'} />
+      <hemisphereLight intensity={danger ? 0.55 : mid ? 0.95 : 0.7} color="#bcdcff" groundColor="#3d4a5e" />
       <directionalLight
-        position={[14, 18, 24]} intensity={mid ? 1.5 : 1.0} color="#ffffff"
+        position={[18, 26, 30]} intensity={danger ? 1.6 : mid ? 2.0 : 1.6} color="#ffffff"
         castShadow={rich} shadow-mapSize={[2048, 2048]}
         shadow-camera-left={-26} shadow-camera-right={26}
         shadow-camera-top={20} shadow-camera-bottom={-20}
       />
+      {/* fill from the far side: the room must never fall to silhouette */}
+      <directionalLight position={[-22, 17, -16]} intensity={danger ? 0.45 : 0.8} color="#9fd8ff" />
       {mid && (
         <Environment resolution={rich ? 128 : 64} frames={1}>
-          <Lightformer form="rect" intensity={rich ? 2.4 : 1.6} color="#9fd8ff"
+          <Lightformer form="rect" intensity={rich ? 3.4 : 2.4} color="#9fd8ff"
             position={[0, 9, 14]} rotation={[Math.PI / 2, 0, 0]} scale={[18, 8, 1]} />
-          <Lightformer form="rect" intensity={rich ? 1.7 : 1.1} color="#22d3ee"
+          <Lightformer form="rect" intensity={rich ? 2.6 : 1.8} color="#22d3ee"
             position={[-14, 6, -12]} rotation={[0, Math.PI / 3, 0]} scale={[14, 7, 1]} />
-          <Lightformer form="rect" intensity={rich ? 1.4 : 0.9} color="#f472b6"
+          <Lightformer form="rect" intensity={rich ? 2.2 : 1.5} color="#f472b6"
             position={[14, 5, -10]} rotation={[0, -Math.PI / 3, 0]} scale={[12, 6, 1]} />
-          <Lightformer form="circle" intensity={rich ? 1.4 : 1} color="#34d399"
+          <Lightformer form="circle" intensity={rich ? 2.0 : 1.5} color="#34d399"
             position={[0, 4, -16]} scale={[9, 9, 1]} />
-          <Lightformer form="ring" intensity={rich ? 0.9 : 0.6} color="#ffffff"
+          <Lightformer form="ring" intensity={rich ? 1.6 : 1.2} color="#ffffff"
             position={[0, 10, 0]} rotation={[Math.PI / 2, 0, 0]} scale={[16, 16, 1]} />
+          {/* overhead softbox — gives every metal surface something bright to mirror */}
+          <Lightformer form="rect" intensity={2.6} color="#ffffff"
+            position={[0, 12, 0]} rotation={[Math.PI / 2, 0, 0]} scale={[34, 20, 1]} />
         </Environment>
       )}
 
       <Room quality={detail || 'balanced'} night={!mid} />
       <Truss />
-      <CeilingLights night={!mid} />
+      <CeilingLights night={!mid} lights={mid} />
+      {/* one soft light per station, tinted in that station's own accent */}
+      {mid && STATIONS.map((st) => {
+        const c = centres[st.key]
+        if (!c) return null
+        return (
+          <pointLight key={`z-${st.key}`} position={[c.x, 3.8, c.z]}
+            color={accentOf(st.accent)} intensity={danger ? 9 : 17} distance={19} decay={2} />
+        )
+      })}
       <Dais accent={accentOf('#22d3ee')} active={activeStation === 'command'} />
 
       {/* ── furniture built from the seating plan ─────────────────── */}
@@ -790,7 +819,7 @@ export const HQ: React.FC<HQProps> = (props) => {
         <Canvas
           shadows={detail === 'cinematic'}
           dpr={detail === 'cinematic' ? [1, 1.75] : detail === 'balanced' ? [1, 1.5] : [0.75, 1]}
-          camera={{ position: OVERVIEW.pos, fov: 42, near: 0.4, far: 400 }}
+          camera={{ position: OVERVIEW.pos, fov: 45, near: 0.4, far: 400 }}
           gl={{ antialias: detail !== 'performance', powerPreference: 'high-performance' }}
           onPointerMissed={() => { onSelect?.(null) }}
         >
