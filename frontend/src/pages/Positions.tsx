@@ -134,8 +134,11 @@ export const Positions: React.FC = () => {
             <tbody>
               {openTrades.map((t) => {
                 const up = (t.unrealized ?? 0) >= 0
-                const liqDist = t.mark && t.liquidation_price
-                  ? Math.abs((t.liquidation_price - t.mark) / t.mark) * 100 : 999
+                // prefer the venue's live liquidation price; the journal's is
+                // only the estimate taken when the position was opened
+                const liq = t.liquidation_live ?? t.liquidation_price
+                const liqDist = t.mark && liq
+                  ? Math.abs((liq - t.mark) / t.mark) * 100 : 999
                 return (
                   <tr key={t.id} className="glass-row border-t" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
                     <td className="px-3 py-1.5 mono">{t.symbol}</td>
@@ -165,7 +168,7 @@ export const Positions: React.FC = () => {
                     <td className="mono text-right dim">{fmtNum(t.tp_price, 6)}</td>
                     <td className="mono text-right"
                       style={{ color: liqDist < 12 ? 'var(--color-bear)' : undefined }}>
-                      {fmtNum(t.liquidation_price, 6)}
+                      {fmtNum(liq, 6)}
                     </td>
                     <td className="px-3 text-right">
                       {t.trail_active ? (

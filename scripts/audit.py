@@ -197,7 +197,6 @@ def preamble_trimmed(p: Path) -> list[str]:
 def duplicate_blocks(files: list[Path], window: int = 14) -> list[str]:
     """Copy-pasted runs of lines, ignoring blank/comment/brace-only lines."""
     seen: dict[str, list[str]] = defaultdict(list)
-    out = []
     for p in files:
         lines = [ln.strip() for ln in preamble_trimmed(p)]
         keep = [ln for ln in lines if ln and not ln.startswith(("//", "#", "*", "/*"))]

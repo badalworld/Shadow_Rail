@@ -198,15 +198,26 @@ export interface EquityState {
 export interface Reconcile {
   journal_net: number
   journal_fees: number
+  journal_funding_paid: number
   open_entry_fees: number
   exchange_net: number | null
+  /** realised P&L less fees — funding is compared on its own line */
+  venue_trading?: number | null
+  venue_realized?: number | null
   exchange_fees?: number | null
+  exchange_funding?: number | null
+  exchange_other?: number | null
   expected_from_journal: number
   net_drift: number
+  /** venue funding charged ahead of the journal's close-time booking */
+  funding_drift?: number
+  open_trades?: number
   balanced: boolean
+  tolerance?: number
   transport?: string
   rows?: number
   reason?: string
+  error?: string
 }
 
 export interface Stats {

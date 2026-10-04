@@ -28,7 +28,7 @@ async function capture() {
     '/api/status', '/api/health', '/api/config', '/api/ip', '/api/equity',
     '/api/equity/curve?limit=400', '/api/stats', '/api/trades/open',
     '/api/trades/closed?limit=60', '/api/scan', '/api/bots', '/api/office', '/api/logs?limit=120',
-    '/api/about', '/api/events', '/api/indicator/selftest',
+    '/api/events', '/api/indicator/selftest',
   ]
   const out = {}
   for (const p of paths) {
@@ -71,7 +71,6 @@ import { Trades } from './pages/Trades'
 import { Bots } from './pages/Bots'
 import { Logs } from './pages/Logs'
 import { Settings } from './pages/Settings'
-import { About } from './pages/About'
 
 const PAGES: [string, React.ComponentType<any>, string][] = [
   ['Dashboard', Dashboard, 'dashboard'],
@@ -82,7 +81,6 @@ const PAGES: [string, React.ComponentType<any>, string][] = [
   ['Bots', Bots, 'bots'],
   ['Logs', Logs, 'logs'],
   ['Settings', Settings, 'settings'],
-  ['About', About, 'about'],
 ]
 
 export function run() {

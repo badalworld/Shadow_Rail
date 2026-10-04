@@ -1,5 +1,18 @@
+import { authHeaders, getToken } from './token'
+
 /** Typed REST client. Everything is same-origin, so no CORS juggling. */
+export class Unauthorised extends Error {
+  constructor() { super('API token required') }
+}
+
+/** Fired when the server refuses a call for lack of a valid token. */
+export const AUTH_EVENT = 'shadowrail:unauthorised'
+
 const json = async (res: Response) => {
+  if (res.status === 401) {
+    window.dispatchEvent(new Event(AUTH_EVENT))
+    throw new Unauthorised()
+  }
   if (!res.ok) {
     let detail = res.statusText
     try {
@@ -12,17 +25,18 @@ const json = async (res: Response) => {
 }
 
 export const api = {
-  get: <T = any>(path: string): Promise<T> => fetch(path).then(json),
+  get: <T = any>(path: string): Promise<T> =>
+    fetch(path, { headers: authHeaders() }).then(json),
   post: <T = any>(path: string, body?: any): Promise<T> =>
     fetch(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: body === undefined ? undefined : JSON.stringify(body),
     }).then(json),
   put: <T = any>(path: string, body?: any): Promise<T> =>
     fetch(path, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(body ?? {}),
     }).then(json),
 }
@@ -67,10 +81,11 @@ export const endpoints = {
   enginePause: (paused: boolean) => api.post(`/api/engine/pause?paused=${paused}`),
   emergencyClose: () => api.post('/api/engine/emergency-close?confirm=FLATTEN'),
   indicatorTest: () => api.get('/api/indicator/selftest'),
-  about: () => api.get('/api/about'),
 }
 
 export function wsUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${location.host}/ws`
+  const token = getToken()
+  const query = token ? `?token=${encodeURIComponent(token)}` : ''
+  return `${proto}//${location.host}/ws${query}`
 }

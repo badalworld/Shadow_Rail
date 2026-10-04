@@ -1,13 +1,19 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { TokenGate } from './components/TokenGate'
 import { StoreProvider } from './state/store'
 import './index.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <StoreProvider>
-      <App />
-    </StoreProvider>
+    <ErrorBoundary>
+      <TokenGate>
+        <StoreProvider>
+          <App />
+        </StoreProvider>
+      </TokenGate>
+    </ErrorBoundary>
   </React.StrictMode>,
 )

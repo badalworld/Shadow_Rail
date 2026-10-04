@@ -11,8 +11,11 @@ import sys
 
 import uvicorn
 
+from .logsetup import configure
+
 
 def run() -> None:
+    configure()
     port = int(os.environ.get("SHADOW_RAIL_PORT", "8080"))
     host = os.environ.get("SHADOW_RAIL_HOST", "0.0.0.0")
     reload_flag = os.environ.get("SHADOW_RAIL_RELOAD", "0") == "1"
