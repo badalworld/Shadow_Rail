@@ -8,7 +8,6 @@ import { Trades } from './pages/Trades'
 import { Bots } from './pages/Bots'
 import { Logs } from './pages/Logs'
 import { Settings } from './pages/Settings'
-import { About } from './pages/About'
 
 export const App: React.FC = () => {
   const [page, setPage] = useState<PageKey>('dashboard')
@@ -33,7 +32,6 @@ export const App: React.FC = () => {
         {page === 'bots' && <Bots />}
         {page === 'logs' && <Logs />}
         {page === 'settings' && <Settings />}
-        {page === 'about' && <About />}
       </Layout>
     </>
   )

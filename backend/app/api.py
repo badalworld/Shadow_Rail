@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
+import secrets
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -33,16 +35,74 @@ from .util import now_ms
 app = FastAPI(title="Shadow Rail API", version="1.0.0",
               description="Automatic Trading Engine for Binance USDT-M Futures")
 
+# The production bundle is served by this same process, so cross-origin access is
+# not needed at all; the Vite dev server is the only other legitimate caller.
+# `SHADOW_RAIL_CORS_ORIGINS` is a comma-separated allowlist ("*" to opt out).
+_DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
+def cors_origins() -> list[str]:
+    raw = os.environ.get("SHADOW_RAIL_CORS_ORIGINS", "").strip()
+    if not raw:
+        return _DEV_ORIGINS
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+# ── access control ──────────────────────────────────────────────────────────
+# A trading API that can open positions and flatten the book must not be open to
+# anyone who can reach the port.  With `SHADOW_RAIL_API_TOKEN` set (recommended
+# for any deployment with real keys) every /api route and the websocket require
+# the token; /api/health stays open so a supervisor/load balancer can probe
+# liveness without credentials.  Unset = today's local-dashboard behaviour.
+_API_TOKEN_ENV = "SHADOW_RAIL_API_TOKEN"
+_OPEN_PATHS = {"/api/health"}
+_PROTECTED_EXTRA = ("/docs", "/redoc", "/openapi.json")
+
+
+def api_token() -> str:
+    """Read lazily so a restart-free test can set the variable per request."""
+    return os.environ.get(_API_TOKEN_ENV, "").strip()
+
+
+def token_ok(supplied: str, expected: str) -> bool:
+    return bool(expected) and secrets.compare_digest(supplied or "", expected)
+
+
+def _supplied_token(headers: dict, query: dict) -> str:
+    """`X-Api-Token`, `Authorization: Bearer …`, or `?token=` (browsers cannot
+    set headers on a websocket handshake, hence the query form)."""
+    for key, value in headers.items():
+        if key.lower() == "x-api-token":
+            return str(value)
+        if key.lower() == "authorization":
+            return str(value).removeprefix("Bearer ").removeprefix("bearer ").strip()
+    return str(query.get("token", ""))
+
+
+@app.middleware("http")
+async def _enforce_api_token(request: Request, call_next):     # noqa: ANN001
+    expected = api_token()
+    path = request.url.path
+    protected = path.startswith("/api") or path.startswith(_PROTECTED_EXTRA)
+    if expected and protected and path not in _OPEN_PATHS:
+        if not token_ok(_supplied_token(request.headers, request.query_params), expected):
+            return JSONResponse({"detail": "unauthorised — API token required"},
+                                status_code=401)
+    return await call_next(request)
+
+
+# NB: registered *after* the token middleware above, so it is the outermost
+# layer — a 401 still carries the CORS headers and the browser can show the
+# token prompt instead of an opaque CORS failure.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],            # dashboard may be served from the Vite dev server
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 ENGINE: TradingEngine | None = None
-DEV = STORE.cfg.developer
 # the autostart task must be referenced for the life of the process: asyncio
 # keeps only a weak reference to a task, so an unreferenced one can be collected
 # before the engine ever starts
@@ -121,7 +181,7 @@ async def probe_now() -> dict:
 # ══════════════════════════════════════════════════════════════ settings
 @app.get("/api/config")
 async def get_config() -> dict:
-    return {"config": STORE.public_view(), "developer": DEV.model_dump()}
+    return {"config": STORE.public_view()}
 
 
 @app.put("/api/config")
@@ -526,34 +586,13 @@ async def indicator_selftest() -> dict:
     return res
 
 
-async def about_payload() -> dict:
-    """Developer + project attribution (shared with the boot frame)."""
-    return {
-        "developer": DEV.model_dump(),
-        "project": {
-            "name": "Shadow Rail",
-            "engine": "Automatic Trading Engine — Binance USDT-M Futures",
-            "indicator": "Ghost Candle with Shadow Rail (GCSR) by ChartTrader-X",
-            "indicator_url": "https://www.tradingview.com/script/AY5Gz97v-Ghost-Candle-with-Shadow-Rail-Px/",
-            "timeframe": STORE.cfg.engine.monitored_timeframe,
-            "htf_filter": f"{STORE.cfg.indicator.mtfFrame} EMA-{STORE.cfg.indicator.mtfEmaBars}",
-            "mode": eng().hub.mode,
-            "transport": eng().hub.transport,
-            "api_budget_pct": STORE.cfg.engine.api_budget_pct,
-            "bots": len(eng().registry.all()),
-            "strategy": eng().risk.effective_exits(),
-        },
-    }
-
-
-@app.get("/api/about")
-async def about() -> dict:
-    return await about_payload()
-
-
 # ════════════════════════════════════════════════════════════════ websocket
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
+    expected = api_token()
+    if expected and not token_ok(_supplied_token(ws.headers, ws.query_params), expected):
+        await ws.close(code=1008)          # policy violation — no snapshot leaks
+        return
     await ws.accept()
     queue = BUS.subscribe()
     try:
@@ -606,6 +645,11 @@ if WEB_DIR.exists():
         html = _ASSET_RE.sub(lambda m: f"{m.group(1)}?v={stamp}", html)
         if "__SHADOW_RAIL_BOOT__" in html:
             return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+        if api_token():
+            # token-locked console: the shell is served to anyone who can reach
+            # the port, so it must never carry live account state — the client
+            # fetches its snapshot after the token is accepted
+            return HTMLResponse(html, headers={"Cache-Control": "no-store"})
         try:
             boot = await boot_payload()
             payload = json.dumps(boot, default=str).replace("</", "<\\/")
@@ -641,7 +685,6 @@ async def boot_payload() -> dict[str, Any]:
             "closed_trades": {"trades": await DB.closed_trades(limit=100),
                               "total": await DB.count_closed()},
             "config": STORE.public_view(),
-            "about": await about_payload(),
             "ip": await ip_info(),
             "curve": await JOURNAL.cumulative_pnl(limit=400),
             "logs": await DB.query_logs(limit=80),

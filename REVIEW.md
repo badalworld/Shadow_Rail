@@ -5,7 +5,8 @@ Date: 2026-10-04 · branch `arena/01a1049a-shadow-rail` · scope: the whole repo
 live end-to-end run of the engine against the simulator transport.
 
 > Everything below was executed on this checkout.  Re-run it with the commands in
-> [§7](#7-reproduce).
+> [§7](#7-reproduce).  The production follow-up to this review — access control, deployment,
+> backups, CI and the funding split of the ledger check — is in **`PRODUCTION_AUDIT.md`**.
 
 ---
 

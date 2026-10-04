@@ -59,7 +59,8 @@ journalled with `close_reason = trail`, so the history shows exactly how much wa
 ```bash
 # 1 — backend (Python 3.11+)
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r backend/requirements.txt
+pip install -r backend/requirements-dev.txt      # runtime + test tools
+# exact verified versions: pip install -r backend/requirements.lock.txt
 
 # 2 — dashboard (Node 18+)
 cd frontend && npm install && npm run build && cd ..
@@ -104,10 +105,25 @@ cd frontend && npm run hq:audit
 
 # rebuild the dashboard bundle FastAPI serves
 cd frontend && npm run build
+
+# static audit (dead code, duplication, leftovers) — CI runs this with --strict
+python scripts/audit.py --strict
+
+# consistent backup of the live journal (safe while the engine trades)
+python scripts/backup.py
 ```
 
-Environment overrides: `SHADOW_RAIL_PORT` (default 8080), `SHADOW_RAIL_HOST`,
-`SHADOW_RAIL_DATA_DIR` (default `<repo>/data`).
+Environment overrides:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SHADOW_RAIL_PORT` / `SHADOW_RAIL_HOST` | `8080` / `0.0.0.0` | where uvicorn listens |
+| `SHADOW_RAIL_DATA_DIR` | `<repo>/data` | SQLite journal, encrypted config, Fernet key |
+| `SHADOW_RAIL_API_TOKEN` | *unset* | **production switch**: every `/api` route, the websocket, `/docs` and `/openapi.json` then require this token; `/api/health` stays open for supervisors. Unset = the local simulator dashboard (open, as before) |
+| `SHADOW_RAIL_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | comma-separated allowlist; same-origin production needs none |
+| `SHADOW_RAIL_LOG_LEVEL` / `SHADOW_RAIL_LOG_FILE` | `info` / *unset* | process log on stdout (one line per engine event, same records as the Workflow Log) and an optional file mirror |
+| `SHADOW_RAIL_BACKUP_DIR` / `SHADOW_RAIL_BACKUP_KEEP` | `<data>/backups` / `14` | used by `scripts/backup.py` |
+| `SHADOW_RAIL_RELOAD` | `0` | uvicorn reload (development only) |
 
 ---
 
@@ -131,13 +147,19 @@ backend/
       binance.py      USDT-M REST + websockets (orders, protection, user stream)
       sim.py          simulation exchange (offline demo & rehearsal)
       hub.py          MarketHub — candles, universe ranking, scanner allocation, health
-  tests/              98 tests covering every safety-critical rule
+  tests/              120 tests covering every safety-critical rule
 frontend/             React + TypeScript + Tailwind + three.js dashboard
   src/components/hq/  the 3D headquarters: layout (floor plan + cast), furniture,
                       Human (the rigged body), HQ (room, camera, live boards),
                       HQPanel (agent card), DetailToggle, RenderpeopleCredits
   public/models/people/  drop-in slot for licensed Renderpeople scans (empty by default)
   scripts/hq-audit.mjs   asserts the floor plan against the live roster
+scripts/
+  audit.py            dead code / duplication audit (--strict for CI)
+  backup.py           online SQLite snapshots for a running engine
+Dockerfile            multi-stage production image (Node build → Python runtime)
+docker-compose.yml    single-replica stack: token, volume, healthcheck
+.github/workflows/ci.yml   pyflakes + audit + tests + build + live dashboard checks
 data/                 runtime state (git-ignored): config.json, journal, encrypted keys
 ```
 
@@ -179,6 +201,44 @@ opened in one run and closed in the next therefore still reports its full cost �
 this the released P&L silently missed the entry leg of every restarted trade
 (`test_entry_fee_is_booked_even_when_the_close_happens_after_a_restart`).
 
+## Production
+
+The engine is a **single process on purpose** (in-process state, one SQLite writer): run exactly
+one replica per data volume, and keep `stop_grace_period` long enough for the shutdown snapshot.
+
+```bash
+# container (recommended)
+export SHADOW_RAIL_API_TOKEN=$(openssl rand -hex 32)     # openssl rand -hex 32
+docker compose up -d --build                             # binds 127.0.0.1:8080
+docker compose logs -f                                   # one line per engine event
+
+# or a bare host
+pip install -r backend/requirements.txt
+cd backend && SHADOW_RAIL_API_TOKEN=$TOKEN python -m app.main
+```
+
+Checklist — every item is implemented in this repo, `PRODUCTION_AUDIT.md` is the evidence:
+
+| Area | What to do |
+|---|---|
+| Access | set `SHADOW_RAIL_API_TOKEN`; keep the port on localhost/behind TLS + a reverse proxy; the token is pasted once into the dashboard lock screen and kept in that browser |
+| Keys | Binance key with **Read + Trade** only, IP-restricted to the server, never withdrawal permission; test on **testnet** first (Settings → Endpoint) |
+| Data | `data/` (or the `shadow-rail-data` volume) holds the journal, the encrypted keys and the Fernet key — back it up and never commit it |
+| Backups | `python scripts/backup.py` from cron — online, consistent snapshots under `data/backups/`, `SHADOW_RAIL_BACKUP_KEEP` prunes (see *Restore* inside the script) |
+| Monitoring | `GET /api/health` for liveness; the engine's own SOS state drives the dashboard colour; process logs on stdout (journald/`docker logs`) |
+| Upgrades | rebuild, then `docker compose up -d` (or restart): the engine re-adopts open positions and protective orders from the journal + venue |
+| Rollback | stop the container, restore the newest `data/backups/*.sqlite3` over `shadow_rail.sqlite3` (delete stale `-wal`/`-shm`), start the previous image |
+| CI | `.github/workflows/ci.yml` runs pyflakes + the repo audit + 120 tests + type-check/build + the live dashboard checks on every push |
+
+### Restore a backup
+
+```bash
+docker compose stop shadow-rail
+docker run --rm -v shadow-rail-data:/data -v $PWD/data/backups:/backups alpine \
+  sh -c 'cp /backups/shadow_rail-YYYYMMDD-HHMMSS.sqlite3 /data/shadow_rail.sqlite3 && rm -f /data/shadow_rail.sqlite3-*'
+docker compose start shadow-rail
+```
+
 ## Running offline
 
 Without Binance keys the engine boots the **simulation broker**: 150 assets, real
@@ -202,6 +262,13 @@ persisted, so restarts continue where they left off instead of resetting the dem
    restores the previous stop, and if that fails too it flattens the position rather than leave it naked.
 7. Emergency **FLATTEN ALL** button in the sidebar; `pause` stops new entries without disturbing
    the monitors.
+8. **Access control** — set `SHADOW_RAIL_API_TOKEN` for any deployment that holds real keys. Without
+   it any host that can reach the port can trade; with it the console unlocks from that token and
+   the shell never inlines account state (see *Production* below).
+9. **Drift, split honestly** — `/api/reconcile` compares trading P&L (realised minus fees) between
+   journal and venue, exactly, and reports funding on its own line because the venue bills it on
+   open positions while the journal books it at close. Cash movements (deposits, rebates) are a
+   third bucket and can never look like profit.
 
 ## The Command Deck
 
@@ -221,8 +288,7 @@ banner stays up for as long as the connection is broken.  Everything lives in th
 | Closed Trades | history, P&L charts, the celebration tape of the newest closes |
 | Bot Roster | every agent + the pipeline-stage rail |
 | Workflow Log | the full audit trail |
-| Settings | keys + IP, risk/TP-SL (incl. the ROI trail), indicator, engine, advanced |
-| About | developer + build info |
+| Settings | keys + IP, risk/TP-SL (incl. the ROI trail), indicator, engine, advanced, access token |
 
 The sidebar starts **collapsed** — logo plus short labels — and the **⋯ button at the top** expands
 the full menu with the engine controls.

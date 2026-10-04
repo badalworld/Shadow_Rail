@@ -21,7 +21,7 @@ from app.config import STORE
 GET_ROUTES = [
     "/api/status", "/api/health", "/api/config", "/api/ip", "/api/equity",
     "/api/equity/curve", "/api/stats", "/api/trades/open", "/api/trades/closed",
-    "/api/scan", "/api/bots", "/api/logs", "/api/events", "/api/about",
+    "/api/scan", "/api/bots", "/api/logs", "/api/events",
     "/api/indicator/selftest", "/api/reconcile",
 ]
 
@@ -255,8 +255,8 @@ def test_settings_save_keeps_the_office_record(client):
 
 
 def test_routes_are_registered_before_the_spa_catch_all(client):
-    """Regression: /api/about was registered after the SPA catch-all inside the
-    static-mount block, so the catch-all answered 404 for it."""
+    """Regression: the API routes must be registered before the SPA catch-all
+    inside the static-mount block, or the catch-all answers 404 for them."""
     from fastapi.routing import APIRoute
 
     paths = [r.path for r in api.app.routes if isinstance(r, APIRoute)]
@@ -266,3 +266,46 @@ def test_routes_are_registered_before_the_spa_catch_all(client):
         assert route in paths, f"{route} is no longer registered"
         assert paths.index(route) < catch_all, (
             f"{route} is registered after the catch-all and will 404")
+
+
+# ── production access control ───────────────────────────────────────────────
+def test_api_token_gate(client, monkeypatch):
+    """With SHADOW_RAIL_API_TOKEN set, every route and the websocket need the
+    token; the liveness probe stays open for supervisors.  Unset (the default),
+    nothing is gated — the local dashboard keeps working as before."""
+    monkeypatch.setenv("SHADOW_RAIL_API_TOKEN", "s3cret-token")
+
+    # closed: reads, writes, the schema and the docs page
+    assert client.get("/api/status").status_code == 401
+    assert client.post("/api/engine/stop").status_code == 401
+    assert client.get("/openapi.json").status_code == 401
+    assert client.get("/docs").status_code == 401
+    # open: the liveness probe a supervisor uses
+    assert client.get("/api/health").status_code == 200
+
+    # accepted: header, Bearer form and query parameter
+    assert client.get("/api/status", headers={"X-Api-Token": "s3cret-token"}).status_code == 200
+    assert client.get("/api/status",
+                      headers={"Authorization": "Bearer s3cret-token"}).status_code == 200
+    assert client.get("/api/status?token=s3cret-token").status_code == 200
+    assert client.get("/api/status", headers={"X-Api-Token": "wrong"}).status_code == 401
+
+    # the websocket refuses an unauthenticated handshake with 1008 …
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws"):
+            pass
+    # … and a correct token in the query string gets the hello frame
+    with client.websocket_connect("/ws?token=s3cret-token") as ws:
+        assert ws.receive_json()["topic"] == "hello"
+
+    # the shell loads without a token (it has to, to ask for one) but must not
+    # carry the inlined live snapshot
+    shell = client.get("/")
+    assert shell.status_code == 200
+    assert "__SHADOW_RAIL_BOOT__" not in shell.text
+
+    # back to the default: no token configured, everything open again
+    monkeypatch.delenv("SHADOW_RAIL_API_TOKEN")
+    assert client.get("/api/status").status_code == 200
+    assert "__SHADOW_RAIL_BOOT__" in client.get("/").text

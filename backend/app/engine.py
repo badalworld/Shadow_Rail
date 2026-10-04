@@ -32,6 +32,7 @@ from .exchange.base import TAKER_FEE, ExchangeError, Position
 from .exchange.hub import MarketHub
 from .indicators import ghost
 from .journal import JOURNAL, Journal
+from . import logsetup
 from .ratelimit import GOVERNOR, RateLimitHalt
 from .risk import RiskEngine, roi_points, roi_price_step, trail_stop_price
 from .util import now_ms, round_tick
@@ -245,6 +246,9 @@ class TradingEngine:
             topic: str | None = None) -> None:
         rec = {"ts": now_ms(), "level": level, "bot_id": bot_id, "message": message,
                "payload": payload, "topic": topic or bot_id}
+        # machine view: one line on stdout for docker/journald, same event the
+        # dashboard shows — the DB is the operator view, not the ops log
+        logsetup.journal(level, bot_id, message, topic)
         try:
             self._log_queue.put_nowait(rec)
         except asyncio.QueueFull:
@@ -1795,11 +1799,19 @@ class TradingEngine:
                                          publish=False)
                 # model refresh from our own journal
                 drift = await self.reconcile_exchange()
-                if abs(drift.get("net_drift", 0.0)) > 1.0:
+                if drift.get("exchange_net") is not None and not drift.get("balanced", True):
                     self.log("warn", "trade-manager-bot",
-                             f"Journal vs exchange drift ${drift['net_drift']:+,.2f} "
-                             f"(journal {drift['journal_net']:,.2f} vs exchange "
-                             f"{drift['exchange_net']:,.2f}) — check recent fills",
+                             f"Journal vs venue trading drift ${drift['net_drift']:+,.2f} "
+                             f"(journal {drift['expected_from_journal']:,.2f} vs venue "
+                             f"{drift.get('venue_trading', 0.0):,.2f}, tolerance "
+                             f"{drift['tolerance']:,.2f}) — check recent fills",
+                             {"reconcile": drift})
+                elif abs(drift.get("funding_drift") or 0.0) > 1.0 and not drift.get("open_trades"):
+                    # on a flat book every funding charge must have been booked at
+                    # close; a residual means a close missed its funding window
+                    self.log("warn", "trade-manager-bot",
+                             f"Unbooked venue funding ${drift['funding_drift']:+,.2f} on a flat "
+                             f"book — check the last close",
                              {"reconcile": drift})
                 if self.cycle and self.cycle % 20 == 0:
                     rows = await self.journal.feature_rows()
@@ -1846,23 +1858,32 @@ class TradingEngine:
             return out
         if totals is None:
             return out
-        exchange_net = float(totals.get("realized", 0.0)) - float(totals.get("fees", 0.0)) \
-            + float(totals.get("funding", 0.0))
-        out["exchange_net"] = round(exchange_net, 4)
-        out["exchange_fees"] = round(float(totals.get("fees", 0.0)), 4)
-        out["exchange_funding"] = round(float(totals.get("funding", 0.0)), 4)
+        venue_realized = float(totals.get("realized", 0.0))
+        venue_fees = float(totals.get("fees", 0.0))
+        venue_funding = float(totals.get("funding", 0.0))
+        venue_trading = venue_realized - venue_fees
+        out["exchange_net"] = round(venue_trading + venue_funding, 4)
+        out["venue_trading"] = round(venue_trading, 4)
+        out["venue_realized"] = round(venue_realized, 4)
+        out["exchange_fees"] = round(venue_fees, 4)
+        out["exchange_funding"] = round(venue_funding, 4)
         # deposits / transfers / rebates are cash movements, not trading P&L —
         # reported separately so they can never masquerade as journal drift
         out["exchange_other"] = round(float(totals.get("other", 0.0)), 4)
-        # the journal books closed trades; the exchange books everything, so
-        # subtract what is still open (its entry fees are already paid)
-        expected = journal_net - open_fees
-        out["expected_from_journal"] = round(expected, 4)
-        out["net_drift"] = round(exchange_net - expected, 4)
-        # funding on *open* positions is billed by the venue before we close
-        # the trade, so allow a small proportional slack on top of the cent-level
-        # rounding tolerance.
-        tol = max(1.0, abs(out["exchange_net"]) * 0.001)
+
+        # Funding is billed on *open* positions and only booked by the journal
+        # when the trade closes, so it is compared on its own line: the drift
+        # check below strips funding from both sides and stays exact, while
+        # `funding_drift` shows what the venue has charged ahead of the close.
+        journal_trading = journal_net + journal_funding - open_fees
+        out["expected_from_journal"] = round(journal_trading, 4)
+        out["net_drift"] = round(venue_trading - journal_trading, 4)
+        out["funding_drift"] = round(venue_funding + journal_funding, 4)
+        out["open_trades"] = len(self.open_trades)
+
+        # fills round to the exchange tick and a few closes fall back to an
+        # estimate, so allow a small proportional slack on top of the cent level
+        tol = max(1.0, abs(venue_trading) * 0.001)
         out["tolerance"] = round(tol, 4)
         out["balanced"] = abs(out["net_drift"]) <= tol
         return out

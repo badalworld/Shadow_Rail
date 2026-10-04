@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Activity, AlertOctagon, BarChart3, Bot as BotIcon, Info, LayoutDashboard, ListTree,
+  Activity, AlertOctagon, BarChart3, Bot as BotIcon, LayoutDashboard, ListTree,
   MoreHorizontal, Pause, Play, Power, Radar, Settings as SettingsIcon, ShieldAlert,
   Square, Terminal, Wallet, Zap, Waves,
 } from 'lucide-react'
@@ -11,7 +11,7 @@ import { Chip, statusColor } from './Glass'
 import { Toasts } from './Toasts'
 
 export type PageKey = 'dashboard' | 'positions' | 'account' | 'scan' | 'trades' | 'bots' | 'logs'
-  | 'settings' | 'about'
+  | 'settings'
 
 const NAV: { key: PageKey; label: string; icon: React.ReactNode; hint: string }[] = [
   { key: 'dashboard', label: 'Command Deck', icon: <LayoutDashboard size={19} />, hint: '3D bot work zone' },
@@ -22,7 +22,6 @@ const NAV: { key: PageKey; label: string; icon: React.ReactNode; hint: string }[
   { key: 'bots', label: 'Bot Roster', icon: <BotIcon size={19} />, hint: '29 agents + pipeline' },
   { key: 'logs', label: 'Workflow Log', icon: <Terminal size={19} />, hint: 'Full audit trail' },
   { key: 'settings', label: 'Settings', icon: <SettingsIcon size={19} />, hint: 'Keys, risk, IP' },
-  { key: 'about', label: 'About', icon: <Info size={19} />, hint: 'Developer' },
 ]
 
 export const Layout: React.FC<{

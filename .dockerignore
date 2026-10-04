@@ -1,0 +1,11 @@
+.git
+.github
+data
+**/__pycache__
+**/*.pyc
+backend/web
+frontend/node_modules
+frontend/scripts/fixtures.json
+frontend/tsconfig.tsbuildinfo
+.venv
+*.md

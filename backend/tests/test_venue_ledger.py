@@ -73,3 +73,52 @@ async def test_kline_streams_keep_a_strong_task_reference(monkeypatch):
     for task in client._stream_tasks:
         assert not task.cancelled()
     assert all("streams=" in url for url in seen)
+
+
+async def test_funding_on_open_positions_is_reported_not_counted_as_drift(db, store):
+    """
+    The venue bills funding on a position while it is still open; the journal
+    books it when the trade closes.  The trading-P&L drift must stay exact
+    through both halves, and the venue's early charge must be visible on its own
+    line instead of hiding inside a loose tolerance.
+    """
+    import pytest
+
+    from app.exchange.base import Fill
+    from app.util import now_ms
+    from tests.test_engine_flow import make_engine, make_opportunity, _set_price
+
+    eng = await make_engine(store, universe=12)
+    await _set_price(eng, "BTCUSDT", 100.0)
+    trade = await eng._open_trade("execution-1",
+                                  make_opportunity("BTCUSDT", "LONG", 100.0, 2.0),
+                                  {"equity": 10_000.0, "available": 10_000.0,
+                                   "open_count": 0})
+    assert trade
+
+    # …the venue charges funding on the still-open position (exactly what the
+    # simulator's _maybe_funding does: balance, ledger and the fill record)
+    ex = eng.hub.exchange
+    charge = -4.75
+    ex.balance += charge
+    ex.funding_net += charge
+    ex.positions["BTCUSDT"].funding_paid += charge
+    ex.fills.append(Fill(symbol="BTCUSDT", side="FUNDING_FEE", qty=0.0, price=0.0,
+                         realized_pnl=charge, ts=now_ms(), kind="FUNDING_FEE",
+                         trade_id="funding-test"))
+
+    rep = await eng.reconcile_exchange()
+    assert rep["open_trades"] == 1
+    assert abs(rep["net_drift"]) < 0.01, rep          # trading P&L is untouched
+    assert rep["funding_drift"] == pytest.approx(charge, abs=1e-6)
+    assert rep["balanced"], rep
+
+    # once the trade closes the journal books that funding: the funding line
+    # returns to zero and the drift stays exact
+    await _set_price(eng, "BTCUSDT", 101.0)
+    closed = await eng._close_trade(int(trade["id"]), "reverse_signal")
+    assert closed and closed["funding_paid"] == pytest.approx(-charge, abs=1e-9)
+    rep = await eng.reconcile_exchange()
+    assert abs(rep["net_drift"]) < 0.01, rep
+    assert rep["funding_drift"] == pytest.approx(0.0, abs=1e-6), rep
+    assert rep["balanced"], rep

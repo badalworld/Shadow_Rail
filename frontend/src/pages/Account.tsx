@@ -204,9 +204,11 @@ export const Account: React.FC = () => {
                 ['journal net', fmtMoney(reconcile.journal_net)],
                 ['open entry fees', fmtMoney(reconcile.open_entry_fees)],
                 ['expected from journal', fmtMoney(reconcile.expected_from_journal)],
-                ['venue ledger', fmtMoney(reconcile.exchange_net)],
+                ['venue trading', fmtMoney(reconcile.venue_trading ?? reconcile.exchange_net)],
                 ['drift', fmtMoney(reconcile.net_drift)],
                 ['tolerance', fmtMoney(reconcile.tolerance)],
+                ['funding, venue / journal',
+                 `${fmtMoney(reconcile.exchange_funding)} / ${fmtMoney(-(reconcile.journal_funding_paid || 0))}`],
                 ['transport', String(reconcile.transport || '—')],
               ].map(([k, v]) => (
                 <div key={k} className="flex items-baseline justify-between gap-3">

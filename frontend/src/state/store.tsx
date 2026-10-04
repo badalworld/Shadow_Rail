@@ -60,7 +60,6 @@ type Boot = {
   closed_trades?: { trades: Trade[]; total: number }
   config?: any
   ip?: any
-  about?: any
   curve?: { ts: number; cum: number }[]
   logs?: LogRow[]
 }
