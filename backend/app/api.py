@@ -43,16 +43,20 @@ app.add_middleware(
 
 ENGINE: TradingEngine | None = None
 DEV = STORE.cfg.developer
+# the autostart task must be referenced for the life of the process: asyncio
+# keeps only a weak reference to a task, so an unreferenced one can be collected
+# before the engine ever starts
+_BOOT_TASK: asyncio.Task | None = None
 
 
 @app.on_event("startup")
 async def _startup() -> None:
-    global ENGINE
+    global ENGINE, _BOOT_TASK
     await DB.connect()
     ENGINE = get_engine()
     BUS.publish("system.boot", {"at": now_ms(), "version": app.version})
     if STORE.cfg.engine.autostart:
-        asyncio.create_task(_autostart())
+        _BOOT_TASK = asyncio.create_task(_autostart())
 
 
 async def _autostart() -> None:
@@ -127,7 +131,15 @@ async def put_config(patch: dict = Body(...)) -> dict:
     unknown = STORE.unknown_keys(patch)
     # hot-apply the pieces that can change at runtime
     e.risk = type(e.risk)(cfg.risk)
+    # Rebuild the roster from the new config (seat counts can change), but
+    # re-apply the office record afterwards: ranks, promotions, hires and the
+    # per-bot stats are career data and must survive a settings save.
+    saved_office = e.registry.state()
     e.registry = build_registry(cfg)
+    with contextlib.suppress(Exception):
+        e.registry.restore(saved_office)
+    with contextlib.suppress(Exception):
+        e._rebalance_workload()
     e.registry.publish_all(GOVERNOR.snapshot())
     GOVERNOR.limit_per_min = cfg.engine.api_weight_limit_per_min
     GOVERNOR.budget_pct = cfg.engine.api_budget_pct

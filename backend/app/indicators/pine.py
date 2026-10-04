@@ -41,7 +41,8 @@ def sma(src, length: int) -> np.ndarray:
     return out
 
 
-def _seeded_ma(x: np.ndarray, length: int, alpha: float, seed: str = "sma") -> np.ndarray:
+def _seeded_ma(x: np.ndarray, length: int, alpha: float) -> np.ndarray:
+    """Moving average seeded with the SMA of the first `length` valid samples."""
     n = len(x)
     out = np.full(n, np.nan)
     if length <= 0 or n == 0:
@@ -60,10 +61,7 @@ def _seeded_ma(x: np.ndarray, length: int, alpha: float, seed: str = "sma") -> n
     if start is None:
         return out
     window = x[start:start + length]
-    if seed == "sma":
-        prev = float(np.sum(window) / length)
-    else:                       # first sample
-        prev = float(window[0])
+    prev = float(np.sum(window) / length)
     out[start + length - 1] = prev
     for i in range(start + length, n):
         v = x[i]
@@ -77,12 +75,12 @@ def _seeded_ma(x: np.ndarray, length: int, alpha: float, seed: str = "sma") -> n
 
 def ema(src, length: int) -> np.ndarray:
     x = _as_array(src)
-    return _seeded_ma(x, length, 2.0 / (length + 1.0), seed="sma")
+    return _seeded_ma(x, length, 2.0 / (length + 1.0))
 
 
 def rma(src, length: int) -> np.ndarray:
     x = _as_array(src)
-    return _seeded_ma(x, length, 1.0 / float(length), seed="sma")
+    return _seeded_ma(x, length, 1.0 / float(length))
 
 
 def change(src) -> np.ndarray:

@@ -286,8 +286,6 @@ class ConfigStore:
         never erase the rest of the configuration.
         """
         secrets = {"api_key": "api_key_enc", "api_secret": "api_secret_enc"}
-        known = {key: set(self._cfg.model_dump().get(key, {}) or {})
-                 for key in ("binance", "risk", "indicator", "engine", "ui", "developer")}
         with self._lock:
             current = self._cfg.model_dump()
             for section, values in patch.items():
@@ -301,10 +299,8 @@ class ConfigStore:
                             encrypt(str(value).strip()) if str(value).strip() else "")
                         continue
                     if key not in current[section]:
-                        # tolerate a round-tripped payload: a key we do not model
-                        # is reported rather than swallowed
-                        if key in known.get(section, ()):
-                            current[section][key] = value
+                        # a field this config does not model is never written;
+                        # unknown_keys() reports it so the UI can say so
                         continue
                     current[section][key] = value
             self._cfg = AppConfig.model_validate(current)

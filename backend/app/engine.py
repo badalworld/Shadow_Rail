@@ -152,10 +152,17 @@ class TradingEngine:
         self.paused = False
         self.emergency_stop = False
         self._equity_task_ts = 0
+        # wakes the equity loop the moment something money-relevant happens
+        # (a close), so no page can read a stale realised P&L for a whole tick
+        self._equity_wake = asyncio.Event()
         self.last_equity: dict[str, Any] = {}
         self.recent_analyst_rows: list[dict] = []
         self.pending_close: set[str] = set()
         self.consumed_fills: set[str] = set()
+        # fire-and-forget writes are kept in a strong-reference set: asyncio
+        # holds only weak refs to tasks, so a naked create_task() can be
+        # garbage-collected before it ever runs
+        self._bg_tasks: set[asyncio.Task] = set()
         self._open_lock = asyncio.Lock()
         self.scan_snapshot: dict[str, Any] = {"by_bot": {}, "updated_at": 0, "cycle": 0}
 
@@ -223,6 +230,12 @@ class TradingEngine:
         self.log("warn", "ceo-bot", "Engine stopped")
 
     # ================================================================== log
+    def _spawn(self, coro) -> None:
+        """Run a coroutine in the background, keeping a strong reference to it."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     async def persist_office(self) -> None:
         """Write the office record (ranks, hires, firings) so a restart keeps it."""
         with contextlib.suppress(Exception):
@@ -526,7 +539,11 @@ class TradingEngine:
         while self.running:
             try:
                 if not first:
-                    await asyncio.sleep(5)
+                    # normally a 5 s beat — but a close (or an operator action)
+                    # rings the bell and the sheet is re-read immediately
+                    self._equity_wake.clear()
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self._equity_wake.wait(), timeout=5)
                 first = False
                 if not self.running:
                     return
@@ -1233,7 +1250,7 @@ class TradingEngine:
         if trade_id and trade_id in self.open_trades:
             self.open_trades[trade_id]["monitor_bot_id"] = bot.bot_id
             with contextlib.suppress(Exception):
-                asyncio.create_task(DB.update_trade(trade_id, {"monitor_bot_id": bot.bot_id}))
+                self._spawn(DB.update_trade(trade_id, {"monitor_bot_id": bot.bot_id}))
         bot.assigned = [s for s, b in self.symbol_monitor.items() if b == bot.bot_id]
         return bot.bot_id
 
@@ -1659,6 +1676,9 @@ class TradingEngine:
         self.series_cache.pop(symbol, None)
 
         stats = await self.journal.record_close(trade)
+        # re-read the account on the next tick (immediately): the dashboard must
+        # never show yesterday's realised P&L next to today's closed trade
+        self._equity_wake.set()
         win = net > 0
         # ── bot reactions: celebrate on a win, sad on a loss ───────────────
         for bot in self.registry.all():
@@ -1831,6 +1851,9 @@ class TradingEngine:
         out["exchange_net"] = round(exchange_net, 4)
         out["exchange_fees"] = round(float(totals.get("fees", 0.0)), 4)
         out["exchange_funding"] = round(float(totals.get("funding", 0.0)), 4)
+        # deposits / transfers / rebates are cash movements, not trading P&L —
+        # reported separately so they can never masquerade as journal drift
+        out["exchange_other"] = round(float(totals.get("other", 0.0)), 4)
         # the journal books closed trades; the exchange books everything, so
         # subtract what is still open (its entry fees are already paid)
         expected = journal_net - open_fees

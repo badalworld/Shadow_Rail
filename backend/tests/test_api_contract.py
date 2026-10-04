@@ -228,6 +228,27 @@ def test_websocket_hello_frame_and_live_relay(client):
         assert "bot.promoted" in seen, f"promotion never reached the socket: {seen}"
 
 
+def test_settings_save_keeps_the_office_record(client):
+    """Saving a setting rebuilds the roster from config — the career record
+    (ranks, promotions, per-bot counters) must survive that rebuild."""
+    promoted = client.post("/api/bots/scanner-1/promote")
+    assert promoted.status_code == 200
+    body = promoted.json()
+    assert body["promotion"], "the merit promotion did not register"
+    level = body["bot"]["rank_index"]
+    assert level > 0
+
+    # a harmless re-save of one risk field (the UI sends whole sections)
+    res = client.put("/api/config", json={"risk": {"trail_activation_roi_pct": 25.0}})
+    assert res.status_code == 200 and res.json()["applied"] is True
+
+    after = client.get("/api/bots/scanner-1").json()["bot"]
+    assert after["rank_index"] >= level, "the office ladder was wiped by a settings save"
+    assert after["promotions"] >= 1, "the promotion counter was wiped by a settings save"
+    assert after["capacity"] >= body["bot"]["capacity"], \
+        "the promoted seat lost the workload its rank earned"
+
+
 def test_routes_are_registered_before_the_spa_catch_all(client):
     """Regression: /api/about was registered after the SPA catch-all inside the
     static-mount block, so the catch-all answered 404 for it."""

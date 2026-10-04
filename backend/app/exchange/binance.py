@@ -15,6 +15,7 @@ and the exchange's own X-MBX-USED-WEIGHT-1M header is fed back into it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -55,6 +56,10 @@ class BinanceFutures:
         self._prices: dict[str, float] = {}
         self._listen_key: str = ""
         self._listen_key_at: float = 0.0
+        # asyncio only keeps a *weak* reference to a task, so a background
+        # stream with no other reference can be garbage-collected mid-flight.
+        # Every stream task is therefore held here for the client's lifetime.
+        self._stream_tasks: list[asyncio.Task] = []
         self.last_weight_header: int = 0
         self.healthy: bool = True
         self.last_error: str = ""
@@ -70,6 +75,12 @@ class BinanceFutures:
             )
 
     async def close(self) -> None:
+        for task in self._stream_tasks:
+            task.cancel()
+        for task in self._stream_tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._stream_tasks.clear()
         if self._client:
             await self._client.aclose()
             self._client = None
@@ -304,12 +315,17 @@ class BinanceFutures:
 
         This is the ground truth the journal is reconciled against: realised
         P&L, commissions and funding actually charged by the venue.
+
+        Only trading income counts as trading income: deposits, transfers,
+        bonuses, insurance clears and rebates are *cash movements*, not P&L, so
+        they are reported separately instead of inflating ``realized`` (which
+        would show up as phantom journal↔venue drift).
         """
         try:
             rows = await self.income(limit=1000)
         except Exception:
             return None
-        realized = fees = funding = 0.0
+        realized = fees = funding = other = 0.0
         for r in rows:
             kind = (r.kind or "").upper()
             amount = float(r.realized_pnl or 0.0)
@@ -317,12 +333,12 @@ class BinanceFutures:
                 funding += amount
             elif kind in ("COMMISSION", "FEE"):
                 fees += abs(amount)
-            elif kind in ("REALIZED_PNL", "TRADE", ""):
+            elif kind in ("REALIZED_PNL", "TRADE"):
                 realized += amount
             else:
-                realized += amount
+                other += amount
         return {"realized": realized, "fees": fees, "funding": funding,
-                "rows": len(rows)}
+                "other": other, "rows": len(rows)}
 
     async def user_trades(self, symbol: str, start_ms: int | None = None,
                           limit: int = 500) -> list[Fill]:
@@ -482,7 +498,8 @@ class BinanceFutures:
             part = syms[i:i + chunk]
             streams = "/".join(f"{s}@kline_{interval}" for s in part)
             url = f"{self.ws_base}/stream?streams={streams}"
-            asyncio.create_task(self._kline_worker(url, on_candle, on_close))
+            self._stream_tasks.append(
+                asyncio.create_task(self._kline_worker(url, on_candle, on_close)))
 
     async def _kline_worker(self, url: str, on_candle: Callable, on_close: Callable | None) -> None:
         backoff = 1.0
