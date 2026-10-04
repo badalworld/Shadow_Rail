@@ -143,3 +143,26 @@ Live dashboard re-check after the frontend cleanup: headquarters renders with
 minimal labels (department names and agent names only), sidebar symbols only,
 no win/loss banner, no ambient amber warning — captured to
 `/tmp/shot/post_audit_deck.png`.
+
+---
+
+## 7. Follow-up: win rate & profitability (2026-10-04)
+
+The audit above ended with a system that was **losing money** on the measured
+market: 44.4 % win rate, PF 1.072, −88 % in-sample, because round-trip costs
+(0.10 % of price) are the same order as the indicator's edge (+0.24 ATR per
+24 bars).
+
+The follow-up work — measurement lab, feature study, robustness grid and the
+resulting engine changes — is written up in **[WIN_RATE.md](WIN_RATE.md)**.
+Headline: `indicator_default` (1.5/3.0 ATR, 8 % margin) → `edge_runner`
+(one volatility-normalised stop, cash-at-risk sizing, R-denominated protection,
+two entry gates) moves the measured system from
+
+| | win rate | PF | expectancy | max DD |
+|---|---|---|---|---|
+| before | 37.8 % | 0.89 | −0.060 R | 91 % |
+| after (IS / OOS) | 43.0 / 43.7 % | 1.48 / 1.48 | +0.283 / +0.292 R | 9.2 / 15.4 % |
+
+Static audit after the change: **0 findings** (`scripts/audit.py --strict`),
+pyflakes clean, 146/146 tests green, `npx tsc --noEmit` and `npm run build` clean.

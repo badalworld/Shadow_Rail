@@ -80,6 +80,21 @@ async def test_the_trail_never_sits_on_the_losing_side_or_beyond_liquidation():
     assert stop <= 103.0 * 0.995
 
 
+def _classic(store):
+    """
+    Pin the documented ROI-trail configuration: 1.5/3.0 ATR with a target,
+    margin sizing, the trail measured in ROI points and no break-even ratchet.
+    The tests below are about *that* rule, so they must not drift when the
+    shipped default moves.
+    """
+    store.cfg.risk.risk_mode = "indicator_default"
+    store.cfg.risk.trail_mode = "roi"
+    store.cfg.risk.sizing_mode = "margin"
+    store.cfg.edge.breakeven_enabled = False
+    store.cfg.edge.time_stop_enabled = False
+    store.save()
+
+
 async def _open(eng):
     await _set_price(eng, "BTCUSDT", ENTRY)
     return await eng._open_trade("execution-1", make_opportunity("BTCUSDT", "LONG", ENTRY, 2.0),
@@ -111,6 +126,7 @@ async def _protective_orders(eng):
 
 async def test_the_trail_moves_the_single_stop_order_on_the_venue(db, store):
     eng = await make_engine(store, universe=12)
+    _classic(store)
     store.cfg.risk.trail_min_step_roi_pct = 0.0      # every tick may ratchet
     store.save()
     trade = await _open(eng)
@@ -157,6 +173,7 @@ async def test_the_trail_moves_the_single_stop_order_on_the_venue(db, store):
 
 async def test_the_trail_stop_closes_the_trade_and_is_labelled_trail(db, store):
     eng = await make_engine(store, universe=12)
+    _classic(store)
     store.cfg.risk.trail_min_step_roi_pct = 0.0
     store.save()
     trade = await _open(eng)
@@ -182,6 +199,7 @@ async def test_the_trail_stop_closes_the_trade_and_is_labelled_trail(db, store):
 
 async def test_trail_is_disabled_when_the_operator_turns_it_off(db, store):
     eng = await make_engine(store, universe=12)
+    _classic(store)
     store.cfg.risk.trail_roi_enabled = False
     store.save()
     trade = await _open(eng)
@@ -197,6 +215,7 @@ async def test_the_trail_survives_a_restart_and_still_sees_the_live_stop(db, sto
     """After a restart the journal must find the stop that is already on the
     venue, otherwise the trail would leave a second, orphaned order behind."""
     eng = await make_engine(store, universe=12)
+    _classic(store)
     store.cfg.risk.trail_min_step_roi_pct = 0.0
     store.save()
     trade = await _open(eng)

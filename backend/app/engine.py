@@ -27,18 +27,31 @@ from .bots import BotRegistry, build_registry, workflow_links
 from .bus import BUS
 from .confidence import MODEL
 from .config import ConfigStore, STORE
+from . import edge
 from .db import DB
 from .exchange.base import TAKER_FEE, ExchangeError, Position
 from .exchange.hub import MarketHub
 from .indicators import ghost
 from .journal import JOURNAL, Journal
 from .ratelimit import GOVERNOR, RateLimitHalt
-from .risk import RiskEngine, roi_points, roi_price_step, trail_stop_price
-from .util import now_ms, round_tick
+from .risk import (RiskEngine, roi_points, roi_price_step, trail_params_in_roi,
+                   trail_stop_price)
+from .util import now_ms, round_tick, tf_ms
 
 SCAN_TIMEOUT_S = 120
 MAX_OPPORTUNITIES_PER_CYCLE = 40
 SYMBOL_COOLDOWN_S = 300
+
+_GATE_BUCKETS = ("trend quality", "chop", "market dead", "volatility extreme",
+                 "chasing", "order flow", "signal bar", "edge/cost")
+
+
+def edge_gate_bucket(reason: str) -> str:
+    """Collapse a gate message to a stable key for the rejection tally."""
+    for key in _GATE_BUCKETS:
+        if reason.startswith(key):
+            return key
+    return reason[:48]
 
 
 @dataclass
@@ -60,6 +73,7 @@ class Opportunity:
     bar_time: int
     scanner_id: str
     features: dict[str, Any] = field(default_factory=dict)
+    edge_delta: float = 0.0            # score nudge from the edge gates
 
     def as_dict(self) -> dict[str, Any]:
         return {**self.__dict__}
@@ -158,6 +172,16 @@ class TradingEngine:
         self.consumed_fills: set[str] = set()
         self._open_lock = asyncio.Lock()
         self.scan_snapshot: dict[str, Any] = {"by_bot": {}, "updated_at": 0, "cycle": 0}
+
+        # ── edge layer bookkeeping ────────────────────────────────────────
+        # why the swarm did NOT trade is as important as why it did: the
+        # dashboard shows the rejection tally so an operator can see the gates
+        # working instead of wondering where the signals went.
+        self.edge_rejects: dict[str, int] = {}
+        self.edge_reject_rows: list[dict] = []
+        self._loss_streak = 0
+        self._equity_peak = 0.0
+        self._throttle_reason = ""
 
     # ================================================================ startup
     async def start(self) -> None:
@@ -539,6 +563,8 @@ class TradingEngine:
                                              - state.open_positions),
                            "margin_budget": round(self.journal.margin_budget(), 2)}
                 self.last_equity = payload
+                if state.equity > 0:
+                    self._equity_peak = max(self._equity_peak, state.equity)
                 BUS.publish("equity.update", payload)
                 # keep the paper account durable across restarts (sim only):
                 # every tick, so a restart can never lose a closed trade
@@ -783,6 +809,47 @@ class TradingEngine:
             "bar_time": int(series.times[i]),
         }
 
+    def _aligned_candles(self, symbol: str, series) -> list:
+        """The candle window the cached ``series`` was computed from."""
+        candles = self.hub.candles(symbol)
+        n = len(series.times)
+        return list(candles[-n:]) if len(candles) >= n else list(candles)
+
+    def _edge_verdict(self, symbol: str, sig: dict, series) -> edge.EntryVerdict | None:
+        """
+        Run the entry gates (``app/edge.py``).  Returns ``None`` when the gates
+        are off, otherwise the verdict — a setup that is rejected here never
+        reaches an analyst and never spends a cent of margin.
+        """
+        es = self.store.cfg.edge
+        if not es.entry_filters_enabled and not es.cost_gate_enabled:
+            return None
+        candles = self._aligned_candles(symbol, series)
+        idx = series.bar_index_for_time(int(sig["bar_time"]))
+        if idx < 0 or idx >= len(candles):
+            return None
+        feats = edge.signal_features(series, idx, candles, es.er_bars)
+        sl_mult, tp_mult, tp_on = self.risk.s.active_tp_sl()
+        atr_pct = float(feats.get("atr_pct") or 0.0)
+        tp_dist = (tp_mult * atr_pct) if (tp_on and tp_mult) else 0.0
+        verdict = edge.evaluate_entry(feats, es, direction=sig["direction"],
+                                      leverage=self.store.cfg.risk.leverage,
+                                      tp_distance_pct=tp_dist, enabled=True)
+        if not verdict.ok:
+            for reason in verdict.reasons:
+                key = edge_gate_bucket(reason)
+                self.edge_rejects[key] = self.edge_rejects.get(key, 0) + 1
+            self.edge_reject_rows.insert(0, {
+                "symbol": symbol, "direction": sig["direction"],
+                "reasons": verdict.reasons, "bar_time": sig["bar_time"],
+                "features": {k: round(v, 4) for k, v in feats.items()}})
+            del self.edge_reject_rows[40:]
+            self.log("info", "analyst-1",
+                     f"{symbol}: {sig['direction']} flip rejected by the edge gate — "
+                     f"{'; '.join(verdict.reasons)[:200]}",
+                     {"symbol": symbol, "reasons": verdict.reasons}, topic="analysis")
+        return verdict
+
     async def _to_opportunity(self, symbol: str, sig: dict, series, scanner_id: str
                               ) -> Opportunity | None:
         bar = self.hub.candles(symbol, 2)
@@ -797,6 +864,9 @@ class TradingEngine:
             return None                                  # gate not warm yet → skip
         if self.cooldowns.get(symbol, 0) > time.time():
             return None
+        verdict = self._edge_verdict(symbol, sig, series)
+        if verdict is not None and not verdict.ok:
+            return None
         return Opportunity(
             symbol=symbol, direction=sig["direction"], entry=sig["entry"],
             stop=sig["stop"], target=sig["target"], atr=sig["atr"],
@@ -804,6 +874,7 @@ class TradingEngine:
             rail=sig.get("rail"), rail_distance_pct=sig.get("rail_distance_pct", 0.0),
             htf_bull=bool(sig.get("htf_bull")), flow_bias=float(sig.get("flow_bias", 0.0)),
             volume=sig.get("volume", 0.0), bar_time=sig["bar_time"], scanner_id=scanner_id,
+            edge_delta=(verdict.score_delta if verdict else 0.0),
             features={
                 "trend_quality": sig["trend_quality"], "tier": sig["tier"],
                 "htf_bull": bool(sig.get("htf_bull")), "atr_pct": sig["atr_pct"],
@@ -835,7 +906,9 @@ class TradingEngine:
                                          f"analysing {opp.symbol} {opp.direction}",
                                          progress=0.4)
                 # small deterministic per-analyst variance (independent opinions)
-                variance = ((hash(bot.bot_id + opp.symbol) % 7) - 3) * 0.9
+                # plus whatever the edge gates decided this setup deserved
+                variance = ((hash(bot.bot_id + opp.symbol) % 7) - 3) * 0.9 \
+                    + opp.edge_delta
                 res = MODEL.score(opp.features, sym_stats.get(opp.symbol),
                                   analyst_variance=variance)
                 threshold = self.store.cfg.risk.min_confidence
@@ -888,6 +961,13 @@ class TradingEngine:
         open_count = len(self.open_trades)
 
         # hard guards before spending any API weight
+        blocked = self._throttle_verdict()
+        if blocked:
+            self.log("warn", "risk-bot",
+                     f"New entries held — {blocked}. Protection and closes stay armed.")
+            self.registry.set_status("risk-bot", "blocked", "risk throttle",
+                                     message=blocked[:160])
+            return []
         if self.journal.daily_drawdown_breached():
             self.log("warn", "risk-bot",
                      f"Daily drawdown guard tripped ({state.daily_pnl:.2f}) — no new trades")
@@ -938,6 +1018,34 @@ class TradingEngine:
                      + ", ".join(t["symbol"] for t in opened), topic="execution")
         return opened
 
+    def _throttle_verdict(self) -> str:
+        """
+        Stop *opening* while the account is bleeding.  Only entries are ever
+        held — protective closes, the trail and the break-even ratchet keep
+        running, so a position can never be trapped by the throttle.
+        """
+        es = self.store.cfg.edge
+        if not es.drawdown_throttle_enabled:
+            return ""
+        if es.max_loss_streak and self._loss_streak >= es.max_loss_streak:
+            return f"loss streak {self._loss_streak} >= {es.max_loss_streak}"
+        if es.throttle_drawdown_pct > 0 and self._equity_peak > 0:
+            dd = (self._equity_peak - self._current_equity()) / self._equity_peak * 100.0
+            if dd >= es.throttle_drawdown_pct:
+                return f"drawdown {dd:.1f}% >= {es.throttle_drawdown_pct:.1f}%"
+        return ""
+
+    def _current_equity(self) -> float:
+        equity = float(self.last_equity.get("equity") or 0.0)
+        return equity or float(self.journal.state.equity if hasattr(self.journal, "state") else 0.0)
+
+    def _note_close_outcome(self, net_pnl: float) -> None:
+        """Feed the loss-streak / drawdown throttle from a booked result."""
+        self._loss_streak = self._loss_streak + 1 if net_pnl <= 0 else 0
+        equity = self._current_equity()
+        if equity > 0:
+            self._equity_peak = max(self._equity_peak, equity)
+
     async def _open_trade(self, exec_bot_id: str, proposal: Proposal,
                           ctx: dict[str, Any]) -> dict | None:
         """
@@ -983,10 +1091,14 @@ class TradingEngine:
             ctx = {**ctx, "equity": state.equity, "available": state.available,
                    "open_count": len(self.open_trades)}
         price = self.hub.price(symbol) or opp.entry
+        fraction = edge.size_fraction(
+            proposal.confidence, self.store.cfg.edge,
+            enabled=self.store.cfg.edge.confidence_sizing_enabled)
         plan = self.risk.plan(symbol=symbol, side=side, price=price, atr=opp.atr,
                               equity=ctx["equity"], available=ctx["available"], flt=flt,
                               open_trades=len(self.open_trades),
-                              confidence=proposal.confidence)
+                              confidence=proposal.confidence,
+                              size_fraction=fraction)
         if not plan.ok:
             self.log("info", exec_bot_id,
                      f"{symbol}: sizing rejected — {plan.reason}", {"plan": plan.as_dict()},
@@ -1117,6 +1229,13 @@ class TradingEngine:
                 "planned_sl_atr": sl_mult, "planned_tp_atr": tp_mult if tp_on else 0.0,
                 "atr": opp.atr, "bar_time": opp.bar_time,
                 "liquidation_estimate": plan.liquidation_price,
+                # the trade's own risk unit: every R-denominated rule (trail,
+                # break-even) is measured against this, not against ROI points,
+                # so a wide volatility-normalised stop stays meaningful
+                "risk_amount": plan.risk_amount,
+                "risk_distance": abs(entry - sl_price),
+                "sizing_mode": plan.sizing_mode,
+                "size_fraction": round(fraction, 4),
             }),
         }
         trade_id = await DB.insert_trade(trade_row)
@@ -1287,8 +1406,11 @@ class TradingEngine:
         margin = float(trade.get("margin") or 0.0)
         pnl = (mark - entry) * qty * (1 if side == "LONG" else -1)
         roi = roi_points(entry, mark, qty, margin, side)
-        # the ROI trail protects a winner: it only ever tightens the single stop
+        # protection: the ROI/R trail and the break-even lock only ever tighten
+        # the single stop the trade already owns
         await self._trail_tick(trade, pos, mark, bot_id)
+        if await self._time_stop_tick(trade, roi, bot_id):
+            return
         tp = float(trade.get("tp_price") or 0)
         sl = float(trade.get("sl_price") or 0)
         liq = pos.liquidation_price or float(trade.get("liquidation_price") or 0)
@@ -1323,6 +1445,30 @@ class TradingEngine:
             self.registry.set_mood(bot_id, "worried", 15)
         self.registry.publish(bot_id, GOVERNOR.snapshot())
 
+    async def _time_stop_tick(self, trade: dict, roi: float, bot_id: str) -> bool:
+        """
+        Cut a trade that has gone nowhere.  A position that is still flat after
+        a full funding epoch is not "working", it is paying fees and funding to
+        stand still — and it is holding a slot a better setup could use.
+        """
+        es = self.store.cfg.edge
+        if not es.time_stop_enabled or es.time_stop_bars <= 0:
+            return False
+        if roi >= es.time_stop_min_roi:
+            return False
+        bar_ms = tf_ms(self.store.cfg.engine.monitored_timeframe)
+        held = (now_ms() - int(trade.get("opened_at") or 0)) / max(1, bar_ms)
+        if held < es.time_stop_bars:
+            return False
+        self.log("info", bot_id or "monitor-team",
+                 f"{trade['symbol']}: time stop after {held:.0f} bars at "
+                 f"{roi:+.1f}% ROI — freeing the slot",
+                 {"trade_id": trade["id"], "bars": round(held)}, topic="monitor")
+        await self._close_trade(int(trade["id"]), "time_stop",
+                                reason_detail=f"flat for {held:.0f} bars "
+                                              f"(limit {es.time_stop_bars})")
+        return True
+
     async def _trail_tick(self, trade: dict, pos: Position, mark: float,
                           bot_id: str = "") -> None:
         """
@@ -1336,8 +1482,9 @@ class TradingEngine:
         and never sits on the losing side of the entry.
         """
         cfg = self.store.cfg.risk
+        es = self.store.cfg.edge
         enabled, activation, distance, min_step = cfg.trail()
-        if not enabled:
+        if not enabled and not es.breakeven_enabled:
             return
         symbol = trade["symbol"]
         side = trade["side"]
@@ -1346,6 +1493,17 @@ class TradingEngine:
         margin = float(trade.get("margin") or 0.0)
         if qty <= 0 or margin <= 0 or symbol in self.pending_close:
             return
+        notes = {}
+        with contextlib.suppress(Exception):
+            notes = json.loads(trade.get("notes") or "{}") or {}
+        risk_amount = float(notes.get("risk_amount") or 0.0)
+        risk_distance = float(notes.get("risk_distance") or 0.0)
+        if cfg.trail_mode == "r" and risk_amount > 0:
+            # one R = risk/margin of the committed margin, in ROI points — the
+            # only unit that survives a volatility-normalised stop
+            _, act_r, dist_r, step_r = cfg.trail_r()
+            activation, distance, min_step = trail_params_in_roi(
+                risk_amount, margin, act_r, dist_r, step_r)
 
         # ── anchor the peak to the best mark we have seen ────────────────
         peak = float(trade.get("peak_price") or entry)
@@ -1357,12 +1515,40 @@ class TradingEngine:
             peak = new_peak
 
         prev_stop = float(trade.get("sl_price") or 0.0)
-        stop, armed = trail_stop_price(
-            entry=entry, side=side, peak_price=peak, mark=mark, qty=qty, margin=margin,
-            prev_stop=prev_stop, activation_roi=activation, distance_roi=distance,
-            mark_gap_pct=cfg.trail_mark_gap_pct)
+        stop, armed = (prev_stop, False)
+        if enabled:
+            stop, armed = trail_stop_price(
+                entry=entry, side=side, peak_price=peak, mark=mark, qty=qty,
+                margin=margin, prev_stop=prev_stop, activation_roi=activation,
+                distance_roi=distance, mark_gap_pct=cfg.trail_mark_gap_pct)
+
+        # ── the fee-covered break-even ratchet ───────────────────────────
+        # Same single order, one more reason to tighten it: once the trade has
+        # earned ``breakeven_arm_r`` multiples of its risk, the stop moves to a
+        # level that pays both commissions, so the trade can no longer be
+        # booked as a loss.  It is the single biggest win-rate lever measured.
+        new_be = False
+        if (es.breakeven_enabled and not trade.get("be_armed") and risk_distance > 0):
+            roi_now = roi_points(entry, mark, qty, margin, side)
+            sl_roi = -abs(risk_amount) / margin * 100.0 if margin else 0.0
+            if edge.should_arm_breakeven(roi=roi_now, sl_roi=sl_roi, s=es):
+                be = edge.breakeven_price(
+                    entry=entry, side=side, qty=qty,
+                    entry_fee=float(trade.get("entry_fee") or 0.0),
+                    exit_fee_est=entry * qty * TAKER_FEE,
+                    risk_distance=risk_distance, s=es)
+                trade["be_armed"] = 1
+                with contextlib.suppress(Exception):
+                    await DB.update_trade(int(trade["id"]), {
+                        "notes": self._notes_with(trade, be_armed=1)})
+                if be is not None:
+                    better = be > stop if side == "LONG" else be < stop
+                    if better or not armed:
+                        stop, armed, new_be = be, True, True
+
         if not armed:
             return
+        kind = "breakeven" if new_be else "trail"
 
         liq = float(pos.liquidation_price or trade.get("liquidation_price") or 0.0)
         if liq > 0:                                  # belt & braces: never past liq
@@ -1434,22 +1620,28 @@ class TradingEngine:
             return
 
         armed_now = not bool(trade.get("trail_active"))
-        patch = {"sl_price": stop, "trail_stop": stop, "trail_active": 1,
-                 "sl_order_id": order.order_id if order else old_order}
+        patch = {"sl_price": stop, "sl_order_id": order.order_id if order else old_order}
+        if kind == "trail":
+            patch.update({"trail_stop": stop, "trail_active": 1})
+        if trade.get("be_armed"):
+            patch["be_armed"] = 1
         trade.update(patch)
         trade["notes"] = self._notes_with(trade, sl_order_id=patch["sl_order_id"])
         with contextlib.suppress(Exception):
             await DB.update_trade(int(trade["id"]), {**patch, "notes": trade["notes"]})
         with contextlib.suppress(Exception):
-            await DB.add_trade_event(int(trade["id"]), "trail",
+            await DB.add_trade_event(int(trade["id"]), kind,
                                      {"stop": stop, "peak": peak, "peak_roi": round(peak_roi, 3),
                                       "locked_roi": round(locked_roi, 3),
                                       "armed": armed_now})
         icon = "🔒" if armed_now else "⤴"
+        unit = (f"{cfg.trail_activation_r:g}R / {cfg.trail_distance_r:g}R"
+                if cfg.trail_mode == "r" else
+                f"arm {activation:.0f}%, trail {distance:.0f} pts")
         self.log("success", bot_id or "monitor-team",
-                 f"{symbol}: {icon} ROI trail {'armed' if armed_now else 'raised'} — peak "
-                 f"+{peak_roi:.1f}% ROI, stop {stop:.8g} locks +{locked_roi:.1f}% ROI "
-                 f"(rule: arm {activation:.0f}%, trail {distance:.0f} pts)",
+                 f"{symbol}: {icon} {kind} stop {'locked' if new_be else ('armed' if armed_now else 'raised')} — "
+                 f"peak +{peak_roi:.1f}% ROI, stop {stop:.8g} locks +{locked_roi:.1f}% ROI "
+                 f"(rule: {unit})",
                  {"trade_id": trade["id"], "stop": stop, "peak": peak,
                   "peak_roi": round(peak_roi, 3), "locked_roi": round(locked_roi, 3)},
                  topic="monitor")
@@ -1660,6 +1852,7 @@ class TradingEngine:
 
         stats = await self.journal.record_close(trade)
         win = net > 0
+        self._note_close_outcome(net)
         # ── bot reactions: celebrate on a win, sad on a loss ───────────────
         for bot in self.registry.all():
             self.registry.set_mood(bot.bot_id, "happy" if win else "sad", 30)

@@ -125,25 +125,47 @@ class RiskSettings(BaseModel):
     Exactly ONE take-profit / stop-loss system is ever active.
     risk_mode decides which; the unused values are ignored (never double).
     """
-    risk_mode: Literal["indicator_default", "shadow_3x", "custom"] = "indicator_default"
+    risk_mode: Literal["indicator_default", "shadow_3x", "custom",
+                       "edge_runner"] = "edge_runner"
     # indicator_default -> 1.5 / 3.0   (Pine "Risk Map" defaults)
     # shadow_3x         -> 3.0 / none  (exit on reverse signal, wide stop)
     # custom            -> your numbers below
+    # edge_runner       -> the measured default (see WIN_RATE.md): a wide
+    #                      volatility-normalised stop, no fixed target, profits
+    #                      run to the reverse signal or the protective trail
     sl_atr_mult: float = 1.5
     tp_atr_mult: float = 3.0
     tp_enabled: bool = True
     custom_sl_atr_mult: float = 1.5
     custom_tp_atr_mult: float = 3.0
     custom_tp_enabled: bool = True
+    edge_runner_sl_atr_mult: float = 6.0
 
     use_reverse_signal_exit: bool = True
 
-    # ── ROI trailing stop ────────────────────────────────────────────────
+    # ── sizing ───────────────────────────────────────────────────────────
+    # "margin" = the original rule: size_pct_per_trade % of equity as margin.
+    # "risk"   = fixed-fractional: the cash lost if the stop is hit is
+    #            risk_pct_per_trade % of equity, whatever the stop distance is.
+    #            A volatility-normalised stop of 6 ATR and the old 1.5 ATR stop
+    #            cannot carry the same margin without carrying 4× the risk, so
+    #            the wider stop ships with risk-based sizing.  The margin rule
+    #            stays as a hard per-trade ceiling.
+    sizing_mode: Literal["margin", "risk"] = "risk"
+    risk_pct_per_trade: float = 1.0
+    max_margin_per_trade_pct: float = 8.0
+
+    # ── protective trail ─────────────────────────────────────────────────
     # ROI is measured on *margin* (leverage-adjusted), exactly like the
     # "ROI %" column on Binance:  roi = unrealised P&L / margin * 100.
     # The trail only ever *tightens* the single stop the trade already has —
     # it never adds a second order and it can never sit past liquidation.
+    #
+    # "roi" measures the trail in ROI points (the original rule); "r" measures
+    # it in multiples of the trade's own risk, which is the only unit that
+    # stays meaningful when the stop width changes with volatility.
     trail_roi_enabled: bool = True
+    trail_mode: Literal["roi", "r"] = "r"
     trail_activation_roi_pct: float = 25.0   # arm the trail at +25 % ROI …
     trail_distance_roi_pct: float = 15.0     # … keeping the stop 15 ROI-pts
                                              #    behind the peak (⇒ +10 % ROI)
@@ -151,6 +173,9 @@ class RiskSettings(BaseModel):
                                              #    stop improves by this much
     trail_mark_gap_pct: float = 0.05         # keep the trigger this far behind
                                              #    the current price (no instant fire)
+    trail_activation_r: float = 1.5          # "r" mode: arm once the trade has
+    trail_distance_r: float = 0.9            #   travelled this many R, keeping
+    trail_min_step_r: float = 0.1            #   the stop this far behind the peak
 
     leverage: int = 10
     margin_type: Literal["CROSS", "ISOLATED"] = "CROSS"
@@ -168,13 +193,94 @@ class RiskSettings(BaseModel):
         return (self.trail_roi_enabled, self.trail_activation_roi_pct,
                 self.trail_distance_roi_pct, self.trail_min_step_roi_pct)
 
+    def trail_r(self) -> tuple[bool, float, float, float]:
+        """(enabled, activation R, distance R, min step R) for ``trail_mode='r'``."""
+        return (self.trail_roi_enabled, self.trail_activation_r,
+                self.trail_distance_r, self.trail_min_step_r)
+
     def active_tp_sl(self) -> tuple[float, float, bool]:
         """Returns (sl_atr_mult, tp_atr_mult, tp_enabled) for the ONE active system."""
         if self.risk_mode == "indicator_default":
             return 1.5, 3.0, True
         if self.risk_mode == "shadow_3x":
             return 3.0, 0.0, False
+        if self.risk_mode == "edge_runner":
+            return self.edge_runner_sl_atr_mult, 0.0, False
         return self.custom_sl_atr_mult, self.custom_tp_atr_mult, self.custom_tp_enabled
+
+
+class EdgeSettings(BaseModel):
+    """
+    The win-rate / profitability layer (see ``app/edge.py``).
+
+    Every knob is a gate or a rule the backtest lab measured before it was given
+    a default; every one of them can be turned off in Settings without touching
+    the risk engine, and the engine logs the reason whenever a gate rejects a
+    flip.  ``entry_filters_enabled = False`` returns the engine to its original
+    "every confirmed flip is a trade" behaviour.
+    """
+
+    # ── entry gates ────────────────────────────────────────────────────────
+    # The defaults are the two gates that survived measurement; every other
+    # candidate (chop/efficiency, bar-confirmation, flow alignment, "don't
+    # chase the rail") was tried and *not* promoted — the per-bucket edge table
+    # in WIN_RATE.md shows why.  They stay implemented and switchable.
+    entry_filters_enabled: bool = True
+    min_clean_ratio: float = 0.30          # Shadow Rail trend quality floor
+    min_efficiency_ratio: float = 0.0      # 0 = off (measured: non-monotone)
+    er_bars: int = 24
+    min_atr_pct: float = 0.0               # 0 = off (measured: no low-edge tail)
+    max_atr_pct: float = 0.80              # above this, fees eat the move
+    max_rail_distance_pct: float = 6.0     # 6 ≈ off (far-from-rail was the BEST bucket)
+    require_flow_alignment: bool = False   # measured: no promotion
+    min_flow_alignment: float = -0.05
+    require_bar_confirmation: bool = False  # measured: non-monotone, no promotion
+    min_body_ratio: float = 0.05
+    min_volume_ratio: float = 0.0          # 0 = off (soft score tilt only)
+
+    # ── cost gate ──────────────────────────────────────────────────────────
+    # Off by default because the runner has no fixed target to measure; the
+    # max_atr_pct band is the same rule expressed in volatility.  Turn it on
+    # for a mode that does use a target.
+    cost_gate_enabled: bool = False
+    min_edge_to_cost: float = 3.0          # target ≥ 3× the round-trip fee
+    expected_edge_atr: float = 0.25        # gross edge assumed per flip, in ATR
+
+    # ── adaptive exits (still ONE stop + ONE target) ────────────────────────
+    adaptive_exits_enabled: bool = False   # measured: it tightened stops in fast
+    sl_atr_base: float = 1.5               #   markets, which is exactly wrong for
+    tp_atr_base: float = 3.0               #   a drift-capture exit
+    vol_target_atr_pct: float = 0.45
+    sl_scale_min: float = 0.80
+    sl_scale_max: float = 2.20
+    quality_tp_bonus: float = 1.00
+
+    # ── break-even ratchet (moves the ONE stop, never adds one) ─────────────
+    # The single biggest win-rate lever measured: +8 to +11 win-rate points for
+    # no measurable cost in expectancy, because a trade that has travelled 1.5R
+    # can no longer be booked as a loss.
+    breakeven_enabled: bool = True
+    breakeven_arm_r: float = 1.50          # arm once the trade has +1.5R …
+    breakeven_buffer_r: float = 0.25       # … and lock +0.25R, fees included
+
+    # ── time stop ──────────────────────────────────────────────────────────
+    time_stop_enabled: bool = False        # measured: it cut winners short
+    time_stop_bars: int = 96               # 8 h at 5 m — one funding epoch
+    time_stop_min_roi: float = 0.0
+
+    # ── sizing ─────────────────────────────────────────────────────────────
+    confidence_sizing_enabled: bool = False
+    size_min_fraction: float = 0.50
+    size_max_fraction: float = 1.50
+    size_confidence_low: float = 60.0
+    size_confidence_high: float = 85.0
+
+    # ── risk throttle ──────────────────────────────────────────────────────
+    # A safety net, not a strategy: it only ever stops *new entries*, and the
+    # numbers are deliberately loose enough that normal variance cannot trip it.
+    drawdown_throttle_enabled: bool = True
+    throttle_drawdown_pct: float = 15.0    # pause new entries past this DD …
+    max_loss_streak: int = 8               # … or after this many losers in a row
 
 
 class EngineSettings(BaseModel):
@@ -218,6 +324,7 @@ class AppConfig(BaseModel):
     binance: BinanceSettings = Field(default_factory=BinanceSettings)
     indicator: IndicatorSettings = Field(default_factory=IndicatorSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
+    edge: EdgeSettings = Field(default_factory=EdgeSettings)
     engine: EngineSettings = Field(default_factory=EngineSettings)
     ui: UIConfig = Field(default_factory=UIConfig)
     developer: DeveloperInfo = Field(default_factory=DeveloperInfo)
@@ -287,7 +394,8 @@ class ConfigStore:
         """
         secrets = {"api_key": "api_key_enc", "api_secret": "api_secret_enc"}
         known = {key: set(self._cfg.model_dump().get(key, {}) or {})
-                 for key in ("binance", "risk", "indicator", "engine", "ui", "developer")}
+                 for key in ("binance", "risk", "edge", "indicator", "engine",
+                             "ui", "developer")}
         with self._lock:
             current = self._cfg.model_dump()
             for section, values in patch.items():
@@ -315,6 +423,7 @@ class ConfigStore:
         """Keys a client sent that this config does not model (UI drift guard)."""
         known = {"binance": set(BinanceSettings.model_fields),
                  "risk": set(RiskSettings.model_fields),
+                 "edge": set(EdgeSettings.model_fields),
                  "indicator": set(IndicatorSettings.model_fields),
                  "engine": set(EngineSettings.model_fields),
                  "ui": set(UIConfig.model_fields),
@@ -356,9 +465,14 @@ class ConfigStore:
             "tp_enabled": self.cfg.risk.active_tp_sl()[2],
             "reverse_signal_exit": self.cfg.risk.use_reverse_signal_exit,
             # the trail only *moves* the single stop this system already placed
-            "trail_roi_enabled": self.cfg.risk.trail_roi_enabled,
+            "trail_enabled": self.cfg.risk.trail_roi_enabled,
+            "trail_mode": self.cfg.risk.trail_mode,
+            "trail_activation_r": self.cfg.risk.trail_activation_r,
+            "trail_distance_r": self.cfg.risk.trail_distance_r,
             "trail_activation_roi_pct": self.cfg.risk.trail_activation_roi_pct,
             "trail_distance_roi_pct": self.cfg.risk.trail_distance_roi_pct,
+            "sizing_mode": self.cfg.risk.sizing_mode,
+            "risk_pct_per_trade": self.cfg.risk.risk_pct_per_trade,
         }
         return data
 

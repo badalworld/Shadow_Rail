@@ -48,6 +48,7 @@ class SizingPlan:
     risk_pct_equity: float = 0.0
     stop_clamped: bool = False
     risk_mode: str = "indicator_default"
+    sizing_mode: str = "margin"
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -125,6 +126,39 @@ def trail_stop_price(*, entry: float, side: str, peak_price: float, mark: float,
     return stop, True
 
 
+def risk_based_margin(equity: float, risk_pct: float, stop_distance_pct: float,
+                      leverage: int) -> float:
+    """
+    Margin that puts exactly ``risk_pct`` % of equity at risk.
+
+    ``stop_distance_pct`` is the distance from entry to stop in percent of
+    price; the notional that loses ``risk_cash`` over that distance is
+    ``risk_cash / stop_fraction``, and the margin behind it is that notional
+    divided by the leverage.  This is what makes a volatility-normalised stop
+    safe to widen: the *cash* at risk stays put while the stop moves.
+    """
+    if stop_distance_pct <= 0 or leverage <= 0:
+        return 0.0
+    stop_fraction = stop_distance_pct / 100.0
+    return (equity * (risk_pct / 100.0)) / (stop_fraction * float(leverage))
+
+
+def trail_params_in_roi(trade_risk_amount: float, margin: float,
+                        activation_r: float, distance_r: float,
+                        min_step_r: float) -> tuple[float, float, float]:
+    """
+    Convert an R-denominated trail into the ROI points ``trail_stop_price`` takes.
+
+    One R is ``risk_amount / margin`` of the committed margin, so
+    ``x R = x * risk_amount / margin * 100`` ROI points.  Both trails therefore
+    share one implementation — only the unit changes.
+    """
+    if margin <= 0:
+        return 0.0, 0.0, 0.0
+    per_r = abs(trade_risk_amount) / margin * 100.0
+    return activation_r * per_r, distance_r * per_r, min_step_r * per_r
+
+
 def stop_loss_price(entry: float, side: str, atr: float, sl_mult: float) -> float:
     if side.upper() in ("LONG", "BUY"):
         return entry - sl_mult * atr
@@ -165,7 +199,8 @@ class RiskEngine:
     def plan(self, *, symbol: str, side: str, price: float, atr: float,
              equity: float, available: float, flt: SymbolFilter,
              open_trades: int, mmr: float = DEFAULT_MMR,
-             confidence: float | None = None) -> SizingPlan:
+             confidence: float | None = None,
+             size_fraction: float = 1.0) -> SizingPlan:
         s = self.s
         side = side.upper()
         plan = SizingPlan(symbol=symbol, side="LONG" if side in ("LONG", "BUY") else "SHORT",
@@ -191,8 +226,37 @@ class RiskEngine:
             plan.reason = f"confidence {confidence:.1f} < required {s.min_confidence:.1f}"
             return plan
 
-        # ---- sizing -----------------------------------------------------
-        margin = equity * (s.size_pct_per_trade / 100.0)
+        # ---- stop / target (needed by risk-based sizing) -------------------
+        sl = stop_loss_price(price, plan.side, atr, sl_mult)
+        liq = estimate_liquidation(price, plan.side, s.leverage, mmr)
+        sl, clamped = clamp_stop_to_liquidation(price, plan.side, sl, liq,
+                                               s.liq_safety_buffer_pct)
+        plan.stop_clamped = clamped
+        if clamped:
+            plan.warnings.append(
+                f"ATR stop sat at/through liquidation — tightened to keep "
+                f"{s.liq_safety_buffer_pct:.0f}% buffer inside liq {liq:.8g}")
+        if plan.side == "LONG" and sl >= price:
+            plan.reason = "invalid stop (>= entry) after liquidation clamp"
+            return plan
+        if plan.side == "SHORT" and sl <= price:
+            plan.reason = "invalid stop (<= entry) after liquidation clamp"
+            return plan
+        sl_dist_pct = abs(price - sl) / price * 100.0
+        if sl_dist_pct > s.max_stop_distance_pct:
+            plan.reason = (f"stop distance {sl_dist_pct:.2f}% exceeds max "
+                           f"{s.max_stop_distance_pct:.2f}%")
+            return plan
+
+        # ---- sizing -------------------------------------------------------
+        if s.sizing_mode == "risk":
+            margin = risk_based_margin(equity, s.risk_pct_per_trade, sl_dist_pct,
+                                       s.leverage)
+        else:
+            margin = equity * (s.size_pct_per_trade / 100.0)
+        margin *= max(0.0, size_fraction)
+        # the original percentage-of-equity rule stays as a hard ceiling
+        margin = min(margin, equity * (s.max_margin_per_trade_pct / 100.0))
         if s.max_margin_utilization_pct < 100.0:
             max_margin = equity * (s.max_margin_utilization_pct / 100.0)
             used = equity - available
@@ -221,33 +285,8 @@ class RiskEngine:
             plan.reason = f"insufficient available balance ({available:.2f}) for margin {margin:.2f}"
             return plan
 
-        # ---- stop / target ----------------------------------------------
-        sl = stop_loss_price(price, plan.side, atr, sl_mult)
+        # ---- target (the stop was fixed above, before sizing) -------------
         tp = take_profit_price(price, plan.side, atr, tp_mult) if tp_enabled else 0.0
-        liq = estimate_liquidation(price, plan.side, s.leverage, mmr)
-
-        sl, clamped = clamp_stop_to_liquidation(price, plan.side, sl, liq,
-                                               s.liq_safety_buffer_pct)
-        plan.stop_clamped = clamped
-        if clamped:
-            plan.warnings.append(
-                f"ATR stop sat at/through liquidation — tightened to keep "
-                f"{s.liq_safety_buffer_pct:.0f}% buffer inside liq {liq:.8g}")
-
-        if plan.side == "LONG":
-            if sl >= price:
-                plan.reason = "invalid stop (>= entry) after liquidation clamp"
-                return plan
-        else:
-            if sl <= price:
-                plan.reason = "invalid stop (<= entry) after liquidation clamp"
-                return plan
-
-        sl_dist_pct = abs(price - sl) / price * 100.0
-        if sl_dist_pct > s.max_stop_distance_pct:
-            plan.reason = (f"stop distance {sl_dist_pct:.2f}% exceeds max "
-                           f"{s.max_stop_distance_pct:.2f}%")
-            return plan
 
         # final sanity: stop strictly between entry and liquidation
         if plan.side == "LONG" and not (liq < sl < price):
@@ -277,6 +316,7 @@ class RiskEngine:
         plan.liq_distance_pct = abs(price - liq) / price * 100.0
         plan.risk_amount = risk_amount
         plan.risk_pct_equity = (risk_amount / equity * 100.0) if equity else 0.0
+        plan.sizing_mode = s.sizing_mode
         return plan
 
     # --------------------------------------------------------- exit helpers
@@ -297,6 +337,15 @@ class RiskEngine:
             "reverse_signal_exit": self.s.use_reverse_signal_exit,
             "leverage": self.s.leverage,
             "margin_type": self.s.margin_type,
+            "sizing_mode": self.s.sizing_mode,
+            "risk_pct_per_trade": self.s.risk_pct_per_trade,
+            "max_margin_per_trade_pct": self.s.max_margin_per_trade_pct,
+            "trail_mode": self.s.trail_mode,
+            "trail_roi_enabled": self.s.trail_roi_enabled,
+            "trail_activation_roi_pct": self.s.trail_activation_roi_pct,
+            "trail_distance_roi_pct": self.s.trail_distance_roi_pct,
+            "trail_activation_r": self.s.trail_activation_r,
+            "trail_distance_r": self.s.trail_distance_r,
             "size_pct_per_trade": self.s.size_pct_per_trade,
             "max_concurrent": self.s.max_concurrent_trades,
             "liquidation_buffer_pct": self.s.liq_safety_buffer_pct,

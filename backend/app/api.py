@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from .bots import PROMOTE_EVERY, build_registry, workflow_links
 from .bus import BUS
 from .config import STORE, WEB_DIR
+from . import edge
 from .db import DB
 from .engine import TradingEngine, get_engine
 from .exchange.base import ExchangeError
@@ -84,6 +85,8 @@ async def status() -> dict:
         "equity": e.last_equity,
         "bots": e.registry.snapshot(GOVERNOR.snapshot()),
         "links": workflow_links(),
+        "edge": {"rejects": e.edge_rejects,
+                 "throttle": e._throttle_verdict()},
         "server_time": now_ms(),
     }
 
@@ -117,7 +120,13 @@ async def probe_now() -> dict:
 # ══════════════════════════════════════════════════════════════ settings
 @app.get("/api/config")
 async def get_config() -> dict:
-    return {"config": STORE.public_view(), "developer": DEV.model_dump()}
+    view = STORE.public_view()
+    # the edge layer in one readable block: what the gates are set to, and what
+    # they have actually rejected so far
+    view["edge_summary"] = edge.describe(STORE.cfg.edge)
+    view["edge_rejects"] = eng().edge_rejects
+    view["rejected_recent"] = eng().edge_reject_rows[:10]
+    return {"config": view, "developer": DEV.model_dump()}
 
 
 @app.put("/api/config")

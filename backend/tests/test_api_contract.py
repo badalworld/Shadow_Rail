@@ -103,7 +103,10 @@ def test_status_exposes_what_the_header_reads(client):
         assert "status" in s["workflow"]["stages"][stage]
     assert s["api"]["used_pct"] <= 100 and "halted" in s["api"]
     # the engine reports the operator's risk system
-    assert s["risk"]["risk_mode"] in ("indicator_default", "shadow_3x", "custom")
+    assert s["risk"]["risk_mode"] in ("indicator_default", "shadow_3x", "custom",
+                                      "edge_runner")
+    assert s["risk"]["sizing_mode"] in ("margin", "risk")
+    assert s["risk"]["trail_mode"] in ("roi", "r")
     assert s["risk"]["leverage"] == 10 and s["risk"]["margin_type"] == "CROSS"
 
 
@@ -218,8 +221,12 @@ def test_websocket_hello_frame_and_live_relay(client):
 
         # an action taken through the UI must arrive on the socket
         assert client.post("/api/bots/scanner-1/promote").status_code == 200
+        # the swarm is talking the whole time (a scanner sweep alone is three
+        # frames), so the promotion has to arrive — not necessarily in the first
+        # handful of frames.  Read until it does; the queue is bounded and
+        # drops the oldest, so a frame that never arrives is a real failure.
         seen = []
-        for _ in range(8):
+        for _ in range(80):
             frame = ws.receive_json()
             seen.append(frame["topic"])
             if frame["topic"] == "bot.promoted":

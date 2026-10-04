@@ -1,17 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
-  Activity, CheckCircle2, Copy, Globe, KeyRound, RefreshCw, Save, ShieldAlert, Sliders, Waves, XCircle,
+  Activity, CheckCircle2, Copy, Globe, KeyRound, RefreshCw, Save, ShieldAlert, Sliders, Target, Waves, XCircle,
 } from 'lucide-react'
 import { endpoints } from '../lib/api'
 import { BOOT, useStore } from '../state/store'
 import { Bar, Chip, Panel } from '../components/Glass'
 
-type Tab = 'api' | 'risk' | 'indicator' | 'engine' | 'danger'
+type Tab = 'api' | 'risk' | 'edge' | 'indicator' | 'engine' | 'danger'
 
 const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
   { key: 'api', label: 'Binance API & IP', icon: <KeyRound size={14} /> },
   { key: 'risk', label: 'Risk / TP-SL', icon: <ShieldAlert size={14} /> },
+  { key: 'edge', label: 'Edge & Win Rate', icon: <Target size={14} /> },
   { key: 'indicator', label: 'Indicator', icon: <Waves size={14} /> },
   { key: 'engine', label: 'Engine & Swarm', icon: <Sliders size={14} /> },
   { key: 'danger', label: 'Advanced', icon: <Activity size={14} /> },
@@ -49,7 +50,8 @@ export const Settings: React.FC = () => {
     try {
       const body: any = {
         binance: { ...cfg.binance, api_key: apiKey, api_secret: apiSecret },
-        risk: cfg.risk, indicator: cfg.indicator, engine: cfg.engine, ui: cfg.ui,
+        risk: cfg.risk, edge: cfg.edge, indicator: cfg.indicator, engine: cfg.engine,
+        ui: cfg.ui,
       }
       delete body.binance.api_key_masked
       delete body.binance.api_secret_masked
@@ -318,6 +320,10 @@ export const Settings: React.FC = () => {
                     desc: 'Wide 3×ATR stop, profits run until the indicator flips. Survives more noise, larger loss per stop-out.',
                   },
                   {
+                    id: 'edge_runner', title: 'Edge runner (measured default)',
+                    desc: 'One wide volatility-normalised stop, no fixed target: profits run to the reverse signal, the protective trail or the break-even lock. Highest measured expectancy per unit of risk.',
+                  },
+                  {
                     id: 'custom', title: 'Custom multipliers',
                     desc: 'Set your own SL/TP ATR multiples below. Stop is still clamped inside liquidation.',
                   },
@@ -343,6 +349,18 @@ export const Settings: React.FC = () => {
                     </button>
                   )
                 })}
+
+                {cfg.risk.risk_mode === 'edge_runner' && (
+                  <div className="glass-solid grid grid-cols-2 gap-3 p-3">
+                    <Num label="Stop × ATR" value={cfg.risk.edge_runner_sl_atr_mult}
+                      step={0.5} onChange={(v) => patch('risk', 'edge_runner_sl_atr_mult', v)} />
+                    <div className="text-[0.66rem] leading-relaxed dim">
+                      No take-profit order is ever placed in this mode — the
+                      position is closed by the reverse signal, the trail or the
+                      break-even lock, so exactly one protective system is live.
+                    </div>
+                  </div>
+                )}
 
                 {cfg.risk.risk_mode === 'custom' && (
                   <div className="glass-solid grid grid-cols-2 gap-3 p-3">
@@ -377,13 +395,47 @@ export const Settings: React.FC = () => {
                       enabled
                     </label>
                   </div>
-                  <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-                    <Num label="Activate at ROI %" value={cfg.risk.trail_activation_roi_pct ?? 25}
-                      step={1} onChange={(v) => patch('risk', 'trail_activation_roi_pct', v)} />
-                    <Num label="Trail distance (ROI pts)" value={cfg.risk.trail_distance_roi_pct ?? 15}
-                      step={1} onChange={(v) => patch('risk', 'trail_distance_roi_pct', v)} />
-                    <Num label="Min re-place step (ROI pts)" value={cfg.risk.trail_min_step_roi_pct ?? 1}
-                      step={0.5} onChange={(v) => patch('risk', 'trail_min_step_roi_pct', v)} />
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-[0.66rem] uppercase tracking-wider dim">measured in</span>
+                    {[
+                      { id: 'r', title: 'R multiples', desc: 'arm at ×R of the trade’s own risk' },
+                      { id: 'roi', title: 'ROI points', desc: 'the original % of margin rule' },
+                    ].map((opt) => {
+                      const on = (cfg.risk.trail_mode ?? 'r') === opt.id
+                      return (
+                        <button key={opt.id} onClick={() => patch('risk', 'trail_mode', opt.id)}
+                          className="glass px-3 py-1.5 text-left" style={{
+                            borderColor: on ? 'var(--sr-accent)' : undefined, cursor: 'pointer',
+                          }}>
+                          <div className="text-[0.72rem] font-semibold">{opt.title}</div>
+                          <div className="text-[0.6rem] dim">{opt.desc}</div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {(cfg.risk.trail_mode ?? 'r') === 'r' ? (
+                    <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+                      <Num label="Arm at (×R)" value={cfg.risk.trail_activation_r ?? 1.5}
+                        step={0.25} onChange={(v) => patch('risk', 'trail_activation_r', v)} />
+                      <Num label="Trail distance (×R)" value={cfg.risk.trail_distance_r ?? 0.9}
+                        step={0.25} onChange={(v) => patch('risk', 'trail_distance_r', v)} />
+                      <Num label="Min re-place step (×R)" value={cfg.risk.trail_min_step_r ?? 0.1}
+                        step={0.05} onChange={(v) => patch('risk', 'trail_min_step_r', v)} />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+                      <Num label="Activate at ROI %" value={cfg.risk.trail_activation_roi_pct ?? 25}
+                        step={1} onChange={(v) => patch('risk', 'trail_activation_roi_pct', v)} />
+                      <Num label="Trail distance (ROI pts)" value={cfg.risk.trail_distance_roi_pct ?? 15}
+                        step={1} onChange={(v) => patch('risk', 'trail_distance_roi_pct', v)} />
+                      <Num label="Min re-place step (ROI pts)" value={cfg.risk.trail_min_step_roi_pct ?? 1}
+                        step={0.5} onChange={(v) => patch('risk', 'trail_min_step_roi_pct', v)} />
+                    </div>
+                  )}
+                  <div className="mono text-[0.66rem] dim">
+                    {(cfg.risk.trail_mode ?? 'r') === 'r'
+                      ? 'R multiples survive a volatility-normalised stop: 1 R is always the same cash, whatever the ATR is. Trailing in ROI points instead measures against margin, which changes meaning whenever the stop width changes.'
+                      : 'A tighter ROI trail (e.g. 12/8) raises the win rate and lowers the expectancy — see WIN_RATE.md for the measured trade-off.'}
                   </div>
                   <div className="mono text-[0.66rem] dim">
                     ROI is measured on margin (leverage-adjusted, like Binance): at{' '}
@@ -413,10 +465,27 @@ export const Settings: React.FC = () => {
 
             <Panel title="Sizing, leverage & guards" bodyClass="p-4">
               <div className="grid grid-cols-2 gap-3">
-                <Num label="Margin per trade (% of equity)" value={cfg.risk.size_pct_per_trade} step={0.5}
-                  onChange={(v) => patch('risk', 'size_pct_per_trade', v)} />
+                <label className="flex flex-col gap-1">
+                  <span className="text-[0.62rem] uppercase tracking-wider dim">Sizing rule</span>
+                  <select value={cfg.risk.sizing_mode ?? 'risk'}
+                    onChange={(e) => patch('risk', 'sizing_mode', e.target.value)}
+                    className="rounded-xl border bg-transparent px-3 py-2 text-[0.75rem]"
+                    style={{ borderColor: 'var(--sr-border)', background: 'var(--sr-bg)' }}>
+                    <option value="risk">cash at risk = % of equity (measured default)</option>
+                    <option value="margin">margin = % of equity (original rule)</option>
+                  </select>
+                </label>
+                {(cfg.risk.sizing_mode ?? 'risk') === 'risk' ? (
+                  <Num label="Cash at risk per trade (% of equity)" value={cfg.risk.risk_pct_per_trade ?? 1}
+                    step={0.25} onChange={(v) => patch('risk', 'risk_pct_per_trade', v)} />
+                ) : (
+                  <Num label="Margin per trade (% of equity)" value={cfg.risk.size_pct_per_trade} step={0.5}
+                    onChange={(v) => patch('risk', 'size_pct_per_trade', v)} />
+                )}
                 <Num label="Leverage (×)" value={cfg.risk.leverage} step={1}
                   onChange={(v) => patch('risk', 'leverage', v)} />
+                <Num label="Max margin per trade (% equity)" value={cfg.risk.max_margin_per_trade_pct ?? 8}
+                  step={0.5} onChange={(v) => patch('risk', 'max_margin_per_trade_pct', v)} />
                 <label className="flex flex-col gap-1">
                   <span className="text-[0.62rem] uppercase tracking-wider dim">Margin type</span>
                   <select value={cfg.risk.margin_type} onChange={(e) => patch('risk', 'margin_type', e.target.value)}
@@ -458,6 +527,141 @@ export const Settings: React.FC = () => {
                   equity notional if all {cfg.risk.max_concurrent_trades} slots fill
                 </div>
               </div>
+            </Panel>
+          </div>
+        )}
+
+        {/* ══════════════════════ EDGE & WIN RATE ══════════════════════ */}
+        {tab === 'edge' && (
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+            <Panel title="Entry gates — why a flip is not taken" bodyClass="p-4">
+              <div className="flex flex-col gap-3">
+                <label className="flex items-center gap-2 text-[0.72rem]">
+                  <input type="checkbox" checked={!!cfg.edge?.entry_filters_enabled}
+                    onChange={(e) => patch('edge', 'entry_filters_enabled', e.target.checked)} />
+                  enable the entry gates
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <Num label="Min trend quality (cleanRatio)" value={cfg.edge?.min_clean_ratio ?? 0.3}
+                    step={0.05} onChange={(v) => patch('edge', 'min_clean_ratio', v)} />
+                  <Num label="Max volatility (ATR %)" value={cfg.edge?.max_atr_pct ?? 0.8}
+                    step={0.1} onChange={(v) => patch('edge', 'max_atr_pct', v)} />
+                  <Num label="Min chop efficiency (0 = off)" value={cfg.edge?.min_efficiency_ratio ?? 0}
+                    step={0.02} onChange={(v) => patch('edge', 'min_efficiency_ratio', v)} />
+                  <Num label="Max distance from rail (%)" value={cfg.edge?.max_rail_distance_pct ?? 6}
+                    step={0.5} onChange={(v) => patch('edge', 'max_rail_distance_pct', v)} />
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <label className="flex items-center gap-2 text-[0.72rem]">
+                    <input type="checkbox" checked={!!cfg.edge?.require_flow_alignment}
+                      onChange={(e) => patch('edge', 'require_flow_alignment', e.target.checked)} />
+                    require order-flow alignment
+                  </label>
+                  <label className="flex items-center gap-2 text-[0.72rem]">
+                    <input type="checkbox" checked={!!cfg.edge?.require_bar_confirmation}
+                      onChange={(e) => patch('edge', 'require_bar_confirmation', e.target.checked)} />
+                    require a confirming signal bar
+                  </label>
+                  <label className="flex items-center gap-2 text-[0.72rem]">
+                    <input type="checkbox" checked={!!cfg.edge?.cost_gate_enabled}
+                      onChange={(e) => patch('edge', 'cost_gate_enabled', e.target.checked)} />
+                    cost gate (target ≥ ×{Number(cfg.edge?.min_edge_to_cost ?? 3)} the round trip)
+                  </label>
+                  <Num label="Edge / cost multiple" value={cfg.edge?.min_edge_to_cost ?? 3}
+                    step={0.5} onChange={(v) => patch('edge', 'min_edge_to_cost', v)} />
+                </div>
+                <div className="glass-solid p-3 text-[0.68rem] leading-relaxed dim">
+                  <div className="mb-1 text-[0.62rem] uppercase tracking-wider">measured, not guessed</div>
+                  A round trip costs 0.10 % of price at Binance taker rates. The
+                  volatility cap keeps that to a small fraction of the move the
+                  flip is expected to produce; the trend-quality floor keeps the
+                  trades whose measured forward edge was ~2× the rest. Every
+                  rejection is named in the workflow log.
+                </div>
+              </div>
+            </Panel>
+
+            <Panel title="Protection, sizing & the brake" bodyClass="p-4">
+              <div className="flex flex-col gap-3">
+                <label className="flex items-center gap-2 text-[0.72rem]">
+                  <input type="checkbox" checked={!!cfg.edge?.breakeven_enabled}
+                    onChange={(e) => patch('edge', 'breakeven_enabled', e.target.checked)} />
+                  break-even lock — move the one stop to fee-covered break-even
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <Num label="Arm at (+×R)" value={cfg.edge?.breakeven_arm_r ?? 1.5}
+                    step={0.25} onChange={(v) => patch('edge', 'breakeven_arm_r', v)} />
+                  <Num label="Lock (+×R)" value={cfg.edge?.breakeven_buffer_r ?? 0.25}
+                    step={0.05} onChange={(v) => patch('edge', 'breakeven_buffer_r', v)} />
+                </div>
+                <label className="flex items-center gap-2 text-[0.72rem]">
+                  <input type="checkbox" checked={!!cfg.edge?.time_stop_enabled}
+                    onChange={(e) => patch('edge', 'time_stop_enabled', e.target.checked)} />
+                  time stop — cut a flat trade after {cfg.edge?.time_stop_bars ?? 96} bars
+                </label>
+                <Num label="Time stop (bars)" value={cfg.edge?.time_stop_bars ?? 96}
+                  step={12} onChange={(v) => patch('edge', 'time_stop_bars', v)} />
+                <label className="flex items-center gap-2 text-[0.72rem]">
+                  <input type="checkbox" checked={!!cfg.edge?.confidence_sizing_enabled}
+                    onChange={(e) => patch('edge', 'confidence_sizing_enabled', e.target.checked)} />
+                  size by conviction ({cfg.edge?.size_min_fraction ?? 0.5}×–{cfg.edge?.size_max_fraction ?? 1.5}×)
+                </label>
+                <label className="flex items-center gap-2 text-[0.72rem]">
+                  <input type="checkbox" checked={!!cfg.edge?.drawdown_throttle_enabled}
+                    onChange={(e) => patch('edge', 'drawdown_throttle_enabled', e.target.checked)} />
+                  brake — hold new entries past {cfg.edge?.throttle_drawdown_pct ?? 15}% drawdown
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <Num label="Brake drawdown (%)" value={cfg.edge?.throttle_drawdown_pct ?? 15}
+                    step={1} onChange={(v) => patch('edge', 'throttle_drawdown_pct', v)} />
+                  <Num label="Brake loss streak" value={cfg.edge?.max_loss_streak ?? 8}
+                    step={1} onChange={(v) => patch('edge', 'max_loss_streak', v)} />
+                </div>
+                <label className="flex items-center gap-2 text-[0.72rem]">
+                  <input type="checkbox" checked={!!cfg.edge?.adaptive_exits_enabled}
+                    onChange={(e) => patch('edge', 'adaptive_exits_enabled', e.target.checked)} />
+                  volatility-normalised stop (measured: off — it tightens in fast markets)
+                </label>
+                <div className="glass-solid p-3 text-[0.68rem] leading-relaxed dim">
+                  <div className="mb-1 text-[0.62rem] uppercase tracking-wider">never breaks the one-system rule</div>
+                  The break-even lock and the protective trail <em>move</em> the
+                  single STOP_MARKET the trade already owns. Nothing here adds a
+                  second protective order, and the brake only ever stops new
+                  entries — closes and protection stay armed.
+                </div>
+              </div>
+            </Panel>
+
+            <Panel title="Rejected this session" bodyClass="p-4">
+              {(() => {
+                const rejects: Record<string, number> = cfg.edge_rejects || {}
+                const rows = Object.entries(rejects).sort((a, b) => b[1] - a[1])
+                const total = rows.reduce((n, [, v]) => n + v, 0)
+                if (!total) {
+                  return (
+                    <div className="text-[0.72rem] dim">
+                      No flip has been rejected yet. The tally appears here the
+                      moment a gate blocks one, so you can see the filter working
+                      instead of wondering where the signals went.
+                    </div>
+                  )
+                }
+                return (
+                  <div className="flex flex-col gap-2">
+                    {rows.map(([reason, n]) => (
+                      <div key={reason} className="flex items-center justify-between gap-3">
+                        <span className="text-[0.72rem]">{reason}</span>
+                        <span className="mono text-[0.72rem] accent-text">{n}</span>
+                      </div>
+                    ))}
+                    <div className="mt-1 border-t pt-2 text-[0.66rem] dim"
+                      style={{ borderColor: 'var(--sr-border)' }}>
+                      {total} flips rejected · every one of them is also written to
+                      the workflow log with its measured numbers.
+                    </div>
+                  </div>
+                )
+              })()}
             </Panel>
           </div>
         )}

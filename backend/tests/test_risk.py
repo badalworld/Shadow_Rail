@@ -6,7 +6,8 @@ import pytest
 from app.config import RiskSettings
 from app.exchange.base import SymbolFilter
 from app.risk import (RiskEngine, clamp_stop_to_liquidation, estimate_liquidation,
-                      stop_loss_price, take_profit_price)
+                      risk_based_margin, stop_loss_price, take_profit_price,
+                      trail_params_in_roi)
 
 FLT = SymbolFilter(symbol="BTCUSDT", tick_size=0.1, step_size=0.001, min_qty=0.001,
                    min_notional=5.0, max_qty=1000.0)
@@ -31,7 +32,9 @@ def plan(**kw):
 
 # ───────────────────────────── sizing ─────────────────────────────
 def test_margin_is_eight_percent_of_equity_at_ten_x():
-    p = plan()
+    # the original rule, pinned: sizing_mode="margin" spends a fixed slice of
+    # equity as margin no matter how wide the stop is
+    p = plan(sizing_mode="margin")
     assert p.ok, p.reason
     # qty is floored to the exchange step, so margin never rounds *up* past 8%
     assert p.margin == pytest.approx(800.0, rel=0.01)          # 8% of 10k
@@ -41,12 +44,53 @@ def test_margin_is_eight_percent_of_equity_at_ten_x():
     assert p.leverage == 10 and p.margin_type == "CROSS"
 
 
-def test_default_system_is_indicator_map_1_5_3_0():
-    p = plan()
-    sl_mult, tp_mult, tp_on = RiskSettings().active_tp_sl()
+def test_indicator_default_system_is_still_1_5_3_0():
+    sl_mult, tp_mult, tp_on = RiskSettings(risk_mode="indicator_default").active_tp_sl()
     assert (sl_mult, tp_mult, tp_on) == (1.5, 3.0, True)
+    p = plan(risk_mode="indicator_default")
     assert p.sl_price == pytest.approx(60_000 - 1.5 * 600, rel=1e-4)
     assert p.tp_price == pytest.approx(60_000 + 3.0 * 600, rel=1e-4)
+
+
+# ─────────────────── risk-based sizing (the new default) ───────────────────
+def test_shipped_default_is_the_measured_edge_runner():
+    r = RiskSettings()
+    assert r.risk_mode == "edge_runner"
+    assert r.sizing_mode == "risk"
+    assert r.active_tp_sl() == (6.0, 0.0, False)      # one wide stop, no target
+
+
+def test_risk_sizing_keeps_cash_at_risk_constant_as_the_stop_widens():
+    """
+    The whole point: doubling the stop distance must halve the notional, so the
+    dollars lost when the stop is hit stay at risk_pct_per_trade % of equity.
+    """
+    narrow = plan(sizing_mode="risk", risk_pct_per_trade=1.0,
+                  risk_mode="custom", custom_sl_atr_mult=2.0,
+                  custom_tp_enabled=False)
+    wide = plan(sizing_mode="risk", risk_pct_per_trade=1.0,
+                risk_mode="custom", custom_sl_atr_mult=4.0,
+                custom_tp_enabled=False)
+    assert narrow.ok and wide.ok
+    assert narrow.risk_pct_equity == pytest.approx(1.0, rel=0.02)
+    assert wide.risk_pct_equity == pytest.approx(1.0, rel=0.02)
+    assert wide.notional < narrow.notional        # wider stop ⇒ smaller position
+
+
+def test_risk_sizing_is_capped_by_the_margin_rule():
+    p = plan(sizing_mode="risk", risk_pct_per_trade=50.0,
+             max_margin_per_trade_pct=8.0)
+    assert p.ok
+    assert p.margin <= 10_000.0 * 0.08 + 1e-6
+
+
+def test_r_trail_converts_to_roi_points_using_the_trades_own_risk():
+    # 1 R = risk/margin = 100/500 = 20 % of margin ⇒ 1.5 R = 30 ROI points
+    act, dist, step = trail_params_in_roi(100.0, 500.0, 1.5, 0.9, 0.1)
+    assert act == pytest.approx(30.0)
+    assert dist == pytest.approx(18.0)
+    assert step == pytest.approx(2.0)
+    assert trail_params_in_roi(100.0, 0.0, 1.5, 0.9, 0.1) == (0.0, 0.0, 0.0)
 
 
 def test_only_one_system_ever_active():
@@ -90,8 +134,14 @@ def test_clamp_helper_moves_stop_only_toward_entry():
 def test_stop_distance_cap_rejects_wild_setups():
     # 2x leverage → liquidation is far away, the ATR stop is 30% wide and the
     # 8% distance cap must reject it (it can no longer be blamed on liquidation).
-    p = plan(price=100.0, atr=20.0, leverage=2)
+    p = plan(price=100.0, atr=20.0, leverage=2, sizing_mode="margin")
     assert not p.ok and "max" in p.reason
+
+
+def test_risk_based_margin_maths():
+    # 1 % of 10 000 = 100 at risk over a 2 % stop at 10x ⇒ 100/(0.02*10) = 500
+    assert risk_based_margin(10_000.0, 1.0, 2.0, 10) == pytest.approx(500.0)
+    assert risk_based_margin(10_000.0, 1.0, 0.0, 10) == 0.0
 
 
 # ─────────────────────────── hard guards ───────────────────────────

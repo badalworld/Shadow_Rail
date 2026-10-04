@@ -8,9 +8,10 @@ transport differs.  Used when:
   • transport = 'auto' and Binance is unreachable from this host
     (the Connector Bot still raises SOS so nothing is hidden).
 
-Market model: correlated geometric brownian motion with volatility regimes,
-trend persistence and occasional volatility shocks — enough structure for the
-Shadow Rail state machine to produce realistic flip sequences.
+Market model: volatility-regime switching with trend persistence and shocks —
+enough structure for the Shadow Rail state machine to produce realistic flip
+sequences.  The bar generator lives in ``marketgen`` (shared with the backtest
+lab) so the offline research replay is the same market the dashboard trades.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..bus import BUS
+from .. import marketgen
 from ..util import Candle, now_ms, tf_ms
 from .base import (TAKER_FEE, AccountSnapshot, ExchangeError, Fill, OrderResult,
                    Position, SymbolFilter, Ticker)
@@ -199,26 +201,14 @@ class SimExchange:
         """
         One realistic bar: volatility regimes + an AR(1) momentum term.
 
-        A pure random walk punishes any trend-following strategy, so the
-        simulation would misrepresent the engine.  Real crypto has momentum
-        persistence and volatility clustering, which is what this models.
+        The model itself lives in ``marketgen`` so the offline backtest lab
+        replays *exactly* the market the dashboard is trading.
         """
-        if self.rng.random() < 0.0015:                       # regime switch (~1/670 bars)
-            s.regime = self.rng.choice([0.7, 1.0, 1.0, 1.35, 1.8, 2.4])
-        # momentum: AR(1) with ~25-bar half life, plus rare shock impulses
-        s.drift = 0.97 * s.drift + 0.03 * self.rng.gauss(0, 1) * 0.55
-        if self.rng.random() < 0.002:
-            s.drift += self.rng.choice([-1, 1]) * self.rng.uniform(0.6, 2.2)
-        s.drift = max(-2.2, min(2.2, s.drift))
-        step = s.vol * s.regime * self.rng.gauss(0, 1)
-        drift = s.drift * s.vol * 0.55
-        o = prev_close
-        c = max(prev_close * 1e-6, prev_close * (1.0 + drift + step))
-        wick = abs(self.rng.gauss(0, 1)) * s.vol * s.regime * 0.8 * prev_close
-        hi = max(o, c) + wick
-        lo = max(1e-12, min(o, c) - abs(self.rng.gauss(0, 1)) * s.vol * s.regime * 0.8 * prev_close)
-        vol = s.volume * (0.4 + abs(self.rng.gauss(0, 1)))
-        return Candle(0, o, hi, lo, c, vol)
+        st = marketgen.MarketState(vol=s.vol, drift=s.drift, regime=s.regime,
+                                   volume=s.volume)
+        bar = marketgen.advance(self.rng, st, prev_close)
+        s.drift, s.regime = st.drift, st.regime
+        return bar
 
     def _seed_history(self) -> None:
         """Deterministic pre-history so indicators are warm on first scan."""
@@ -226,7 +216,7 @@ class SimExchange:
             candles: list[Candle] = []
             price = s.price
             t = self._virtual_now - self.bar_ms * self.history_bars
-            s.drift = self.rng.gauss(0, 1) * 0.6
+            s.drift = marketgen.init_drift(self.rng)
             for i in range(self.history_bars):
                 candle = self._advance(s, price)
                 candles.append(Candle(t + i * self.bar_ms, candle.o, candle.h,

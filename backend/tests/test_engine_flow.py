@@ -16,6 +16,16 @@ pytestmark = pytest.mark.asyncio
 async def make_engine(store, hub=None, **overrides) -> TradingEngine:
     store.cfg.risk.max_concurrent_trades = overrides.get("max_trades", 10)
     store.cfg.risk.min_confidence = overrides.get("min_confidence", 0.0)
+    # these tests walk the classic lifecycle (1.5/3.0 ATR with a target and the
+    # 8 %-of-equity margin rule); the shipped default is pinned separately in
+    # test_edge.py so a default change cannot silently rewrite this suite
+    store.cfg.risk.risk_mode = overrides.get("risk_mode", "indicator_default")
+    store.cfg.risk.sizing_mode = overrides.get("sizing_mode", "margin")
+    store.cfg.edge.entry_filters_enabled = overrides.get("entry_filters", False)
+    store.cfg.edge.breakeven_enabled = overrides.get("breakeven", False)
+    store.cfg.edge.time_stop_enabled = overrides.get("time_stop", False)
+    store.cfg.edge.drawdown_throttle_enabled = overrides.get("throttle", False)
+    store.cfg.edge.confidence_sizing_enabled = overrides.get("conf_sizing", False)
     store.cfg.indicator.mtfGate = False
     store.cfg.engine.sim_time_accel = 3000.0        # don't let the clock run during tests
     store.save()
