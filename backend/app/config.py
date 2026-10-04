@@ -160,7 +160,7 @@ class RiskSettings(BaseModel):
     min_confidence: float = 60.0
     liq_safety_buffer_pct: float = 35.0  # stop kept <= 65% of the way to liq
     max_stop_distance_pct: float = 8.0   # sanity cap (reject beyond this)
-    daily_drawdown_stop_pct: float = 0.0  # 0 = disabled
+    daily_drawdown_stop_pct: float = 3.0  # 0 = disabled (v2 default: 3% brake)
     min_notional_override: float = 0.0
 
     def trail(self) -> tuple[bool, float, float, float]:
@@ -175,6 +175,44 @@ class RiskSettings(BaseModel):
         if self.risk_mode == "shadow_3x":
             return 3.0, 0.0, False
         return self.custom_sl_atr_mult, self.custom_tp_atr_mult, self.custom_tp_enabled
+
+
+class StrategySettings(BaseModel):
+    """
+    Strategy v2 — the win-rate layer (see app/strategy.py for the rules).
+    `v2_enabled = False` switches the engine back to the pure GCSR system,
+    so the operator can A/B the layers from the dashboard.
+    """
+    v2_enabled: bool = True
+
+    # ── entry gates (a flip that fails one is skipped, nothing is traded) ──
+    # Defaults are the "selective" values from the backtester sweep
+    # (scripts/backtest.py --sweep): higher ADX + a volatility-expansion floor
+    # monotonically raise the win rate and cut drawdown on the 150×12 000-bar
+    # replay.  20.0 / 1.0 (the looser "trade more" values) are one step away.
+    adx_filter: bool = True          # trend-strength gate
+    adx_length: int = 14
+    adx_min: float = 25.0            # Wilder ADX threshold ("trend on")
+    vol_regime_filter: bool = True   # volatility-expansion gate
+    vol_regime_bars: int = 200       # ATR% median lookback
+    vol_expansion_min: float = 1.1   # trade when ATR% >= this × its median
+    momentum_filter: bool = True     # 5m close on the signal side of EMA-n
+    momentum_ema_bars: int = 20
+
+    # ── exit layers (they only ever tighten the single protective stop) ────
+    breakeven_enabled: bool = True   # move the stop to break-even after +n R
+    breakeven_r: float = 1.0         # progress in R units that arms it
+    breakeven_offset_atr: float = 0.3  # stop sits this × ATR past entry — above
+                                       # the round-trip fee so a "scratch"
+                                       # exit books a small WIN, not a loss
+    time_stop_enabled: bool = True   # cut dead trades before they decay
+    time_stop_bars: int = 24         # bars to show progress (24 × 5m = 2 h)
+    time_stop_min_r: float = 0.3     # "progress" = at least this many R
+
+    # ── portfolio layers ───────────────────────────────────────────────────
+    max_same_direction: int = 5      # crowding cap per side (0 = off)
+    symbol_veto_min_trades: int = 4  # sample size before a veto applies
+    symbol_veto_max_win_rate: float = 35.0  # below this → hard reject
 
 
 class EngineSettings(BaseModel):
@@ -218,6 +256,7 @@ class AppConfig(BaseModel):
     binance: BinanceSettings = Field(default_factory=BinanceSettings)
     indicator: IndicatorSettings = Field(default_factory=IndicatorSettings)
     risk: RiskSettings = Field(default_factory=RiskSettings)
+    strategy: StrategySettings = Field(default_factory=StrategySettings)
     engine: EngineSettings = Field(default_factory=EngineSettings)
     ui: UIConfig = Field(default_factory=UIConfig)
     developer: DeveloperInfo = Field(default_factory=DeveloperInfo)
@@ -287,7 +326,8 @@ class ConfigStore:
         """
         secrets = {"api_key": "api_key_enc", "api_secret": "api_secret_enc"}
         known = {key: set(self._cfg.model_dump().get(key, {}) or {})
-                 for key in ("binance", "risk", "indicator", "engine", "ui", "developer")}
+                 for key in ("binance", "risk", "strategy", "indicator", "engine",
+                             "ui", "developer")}
         with self._lock:
             current = self._cfg.model_dump()
             for section, values in patch.items():
@@ -315,6 +355,7 @@ class ConfigStore:
         """Keys a client sent that this config does not model (UI drift guard)."""
         known = {"binance": set(BinanceSettings.model_fields),
                  "risk": set(RiskSettings.model_fields),
+                 "strategy": set(StrategySettings.model_fields),
                  "indicator": set(IndicatorSettings.model_fields),
                  "engine": set(EngineSettings.model_fields),
                  "ui": set(UIConfig.model_fields),

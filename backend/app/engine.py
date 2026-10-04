@@ -34,7 +34,9 @@ from .indicators import ghost
 from .journal import JOURNAL, Journal
 from .ratelimit import GOVERNOR, RateLimitHalt
 from .risk import RiskEngine, roi_points, roi_price_step, trail_stop_price
-from .util import now_ms, round_tick
+from .strategy import (breakeven_stop, direction_crowded, enrich, r_progress,
+                       symbol_vetoed, time_stop_due)
+from .util import now_ms, round_tick, tf_ms
 
 SCAN_TIMEOUT_S = 120
 MAX_OPPORTUNITIES_PER_CYCLE = 40
@@ -154,6 +156,7 @@ class TradingEngine:
         self._equity_task_ts = 0
         self.last_equity: dict[str, Any] = {}
         self.recent_analyst_rows: list[dict] = []
+        self.gate_rejections: dict[str, int] = {}     # Strategy-v2 gate rejections
         self.pending_close: set[str] = set()
         self.consumed_fills: set[str] = set()
         self._open_lock = asyncio.Lock()
@@ -600,8 +603,17 @@ class TradingEngine:
         # ── 1. scanners (5 bots in parallel) ──────────────────────────────
         self._wf("scan", "start", "5 scanner bots sweeping the volatility-ranked universe")
         opportunities = await self._stage_scan()
+        self.scan_snapshot["gate_rejections"] = dict(self.gate_rejections)
         self._wf("scan", "done", f"{len(opportunities)} opportunities",
-                 count=len(opportunities))
+                 count=len(opportunities),
+                 gates_filtered=sum(self.gate_rejections.values()))
+        if self.gate_rejections:
+            parts = ", ".join(f"{k} {v}" for k, v in
+                              sorted(self.gate_rejections.items(),
+                                     key=lambda kv: -kv[1]))
+            self.log("info", "ceo-bot",
+                     f"Strategy gates filtered {sum(self.gate_rejections.values())} "
+                     f"flips this bar ({parts})", topic="scan")
 
         # ── 1b. instant reverse-signal exits (indicator flip closes position) ──
         await self._handle_reverse_exits(opportunities)
@@ -677,8 +689,16 @@ class TradingEngine:
                       "ghostPlacement", "ghostEase", "mtfGate", "mtfFrame", "mtfEmaBars",
                       "minTrendPct", "require_strong_flip")
         }, slAtrX=self.risk.s.active_tp_sl()[0], tpAtrX=max(0.1, self.risk.s.active_tp_sl()[1] or 3.0))
-        series = await asyncio.to_thread(ghost.compute, candles, params,
-                                        self.store.cfg.engine.monitored_timeframe)
+        strat_cfg = self.store.cfg.strategy
+        tf = self.store.cfg.engine.monitored_timeframe
+
+        def _run() -> ghost.GhostSeries:
+            series = ghost.compute(candles, params, tf)
+            if strat_cfg.v2_enabled:
+                series.strategy = enrich(series, strat_cfg)
+            return series
+
+        series = await asyncio.to_thread(_run)
         self.series_cache[symbol] = (last_t, series)
         return series
 
@@ -686,6 +706,7 @@ class TradingEngine:
         buckets = self.scanner_buckets or [self.hub.universe]
         results: list[Opportunity] = []
         lock = asyncio.Lock()
+        self.gate_rejections = {}
 
         async def scan_bot(index: int, symbols: list[str]) -> None:
             bot_id = f"scanner-{index+1}"
@@ -797,6 +818,19 @@ class TradingEngine:
             return None                                  # gate not warm yet → skip
         if self.cooldowns.get(symbol, 0) > time.time():
             return None
+        # ── Strategy v2 entry gates (trend strength / vol regime / momentum) ──
+        strat = getattr(series, "strategy", None)
+        if strat is not None:
+            ok, reasons = strat.gate(series.last, sig["direction"],
+                                     self.store.cfg.strategy)
+            if not ok:
+                for r in reasons:
+                    self.gate_rejections[r.split(" ")[0]] = \
+                        self.gate_rejections.get(r.split(" ")[0], 0) + 1
+                self.log("debug", scanner_id,
+                         f"{symbol} {sig['direction']} flip vetoed by strategy gate: "
+                         f"{'; '.join(reasons)}", topic="scan")
+                return None
         return Opportunity(
             symbol=symbol, direction=sig["direction"], entry=sig["entry"],
             stop=sig["stop"], target=sig["target"], atr=sig["atr"],
@@ -810,6 +844,7 @@ class TradingEngine:
                 "rail_distance_pct": sig.get("rail_distance_pct", 0.0),
                 "flow_bias": float(sig.get("flow_bias", 0.0)),
                 "symbol": symbol, "direction": sig["direction"],
+                **(strat.features(series.last) if strat is not None else {}),
             })
 
     # =========================================================== stage 2: analysts
@@ -839,9 +874,18 @@ class TradingEngine:
                 res = MODEL.score(opp.features, sym_stats.get(opp.symbol),
                                   analyst_variance=variance)
                 threshold = self.store.cfg.risk.min_confidence
-                approved = res.score >= threshold
-                reason = "" if approved else \
-                    f"confidence {res.score:.1f} < threshold {threshold:.1f}"
+                # Strategy v2: hard veto on structurally losing symbols — a
+                # soft score penalty is not enough to keep us re-buying a name
+                # that keeps losing.
+                veto = symbol_vetoed(sym_stats.get(opp.symbol),
+                                     self.store.cfg.strategy)
+                if veto:
+                    approved = False
+                    reason = veto
+                else:
+                    approved = res.score >= threshold
+                    reason = "" if approved else \
+                        f"confidence {res.score:.1f} < threshold {threshold:.1f}"
                 prop = Proposal(opportunity=opp, analyst_id=bot.bot_id,
                                 confidence=res.score, approved=approved,
                                 factors=res.factors, notes=res.notes, model=res.model,
@@ -917,6 +961,19 @@ class TradingEngine:
                 opp = proposal.opportunity
                 if opp.symbol in self.symbol_to_trade:
                     continue
+                # Strategy v2: direction crowding — ten correlated alts all in
+                # the same direction is one trade, not ten.
+                if cfg.strategy.v2_enabled:
+                    side = "LONG" if opp.direction == "LONG" else "SHORT"
+                    async with lock:
+                        open_sides = [t["side"] for t in self.open_trades.values()]
+                    if direction_crowded(side, open_sides, cfg.strategy):
+                        same = sum(1 for s in open_sides if s == side)
+                        self.log("info", "risk-bot",
+                                 f"{opp.symbol}: skipped — {side} crowding cap "
+                                 f"{same}/{cfg.strategy.max_same_direction}",
+                                 topic="execution")
+                        continue
                 t0 = time.perf_counter()
                 self.registry.set_status(bot.bot_id, "working",
                                          f"executing {opp.symbol} {opp.direction}",
@@ -1116,6 +1173,7 @@ class TradingEngine:
                 "sl_order_id": sl_order_id, "tp_order_id": tp_order_id,
                 "planned_sl_atr": sl_mult, "planned_tp_atr": tp_mult if tp_on else 0.0,
                 "atr": opp.atr, "bar_time": opp.bar_time,
+                "sl_distance0": abs(entry - sl_price),   # 1 R in price units
                 "liquidation_estimate": plan.liquidation_price,
             }),
         }
@@ -1287,8 +1345,15 @@ class TradingEngine:
         margin = float(trade.get("margin") or 0.0)
         pnl = (mark - entry) * qty * (1 if side == "LONG" else -1)
         roi = roi_points(entry, mark, qty, margin, side)
-        # the ROI trail protects a winner: it only ever tightens the single stop
+        # Strategy v2 exit layers, then the ROI trail on top — every one of
+        # them only ever tightens the single protective stop:
+        await self._breakeven_tick(trade, pos, mark, bot_id)
+        if trade["id"] not in self.open_trades:
+            return                              # protection-lost flatten above
         await self._trail_tick(trade, pos, mark, bot_id)
+        if trade["id"] not in self.open_trades:
+            return
+        await self._time_stop_tick(trade, mark, bot_id)
         tp = float(trade.get("tp_price") or 0)
         sl = float(trade.get("sl_price") or 0)
         liq = pos.liquidation_price or float(trade.get("liquidation_price") or 0)
@@ -1382,8 +1447,52 @@ class TradingEngine:
             stop = round_tick(stop, flt.tick_size)
         peak_roi = roi_points(entry, peak, qty, margin, side)
         locked_roi = roi_points(entry, stop, qty, margin, side)
+        armed_now = not bool(trade.get("trail_active"))
+        moved = await self._apply_stop_move(
+            trade, pos, stop, tag="tr", prev_stop=prev_stop,
+            event_kind="trail",
+            event_meta={"stop": stop, "peak": peak, "peak_roi": round(peak_roi, 3),
+                        "locked_roi": round(locked_roi, 3), "armed": armed_now},
+            log_msg=(f"{symbol}: {'🔒' if armed_now else '⤴'} ROI trail "
+                     f"{'armed' if armed_now else 'raised'} — peak "
+                     f"+{peak_roi:.1f}% ROI, stop {stop:.8g} locks "
+                     f"+{locked_roi:.1f}% ROI "
+                     f"(rule: arm {activation:.0f}%, trail {distance:.0f} pts)"),
+            log_payload={"trade_id": trade["id"], "stop": stop, "peak": peak,
+                         "peak_roi": round(peak_roi, 3),
+                         "locked_roi": round(locked_roi, 3)},
+            status_msg=f"stop locks +{locked_roi:.1f}% ROI (peak +{peak_roi:.1f}%)",
+            patch_extra={"trail_stop": stop, "trail_active": 1},
+            bot_id=bot_id)
+        if moved:
+            self.registry.set_mood("guardian-bot", "happy", 20)
+            self.registry.set_status(bot_id or "monitor-team", "success",
+                                     f"trail on {symbol}",
+                                     message=f"stop locks +{locked_roi:.1f}% ROI "
+                                             f"(peak +{peak_roi:.1f}%)")
 
-        # ── move the ONE protective order ────────────────────────────────
+    async def _apply_stop_move(self, trade: dict, pos: Position, new_stop: float,
+                               *, tag: str, prev_stop: float,
+                               event_kind: str, event_meta: dict[str, Any],
+                               log_msg: str, log_payload: dict[str, Any] | None = None,
+                               status_msg: str = "",
+                               patch_extra: dict[str, Any] | None = None,
+                               bot_id: str = "") -> bool:
+        """
+        Move the ONE protective STOP_MARKET order to `new_stop`
+        (cancel + replace — never a second order).
+
+        Shared by the ROI trail and the break-even ratchet: both must honour
+        the hard rule that exactly one stop order exists per position, and
+        both must restore the previous stop (or flatten the position) if the
+        exchange refuses the move, so a position is never left unprotected.
+        `new_stop` must already be strictly tighter than `prev_stop` and
+        tick-rounded — the callers verify that.
+        """
+        symbol = trade["symbol"]
+        side = trade["side"]
+        bot = bot_id or "monitor-team"
+        close_side = "SELL" if side == "LONG" else "BUY"
         old_order = str(trade.get("sl_order_id") or "")
         if not old_order:                      # rows written before the column
             with contextlib.suppress(Exception):
@@ -1398,71 +1507,152 @@ class TradingEngine:
         try:
             if old_order:
                 await self.hub.cancel_order(symbol, old_order)
-            order = await self.hub.stop_market(
-                symbol, "SELL" if side == "LONG" else "BUY", stop, close_position=True,
-                client_id=f"SRtr{int(time.time())}")
+            order = await self.hub.stop_market(symbol, close_side, new_stop,
+                                               close_position=True,
+                                               client_id=f"SR{tag}{int(time.time())}")
         except RateLimitHalt as exc:
-            self._note_blocked(bot_id or "monitor-team", str(exc))
+            self._note_blocked(bot, str(exc))
             with contextlib.suppress(Exception):     # put the old stop back
                 if old_order and order is None:
-                    back = await self.hub.stop_market(
-                        symbol, "SELL" if side == "LONG" else "BUY", prev_stop,
-                        close_position=True, client_id=f"SRtr{int(time.time())}b")
+                    back = await self.hub.stop_market(symbol, close_side, prev_stop,
+                                                      close_position=True,
+                                                      client_id=f"SR{tag}{int(time.time())}b")
                     trade["sl_order_id"] = back.order_id
                     await DB.update_trade(int(trade["id"]), {"sl_order_id": back.order_id})
-            return
+            return False
         except Exception as exc:
-            self.log("error", bot_id or "monitor-team",
-                     f"{symbol}: trail re-place failed ({str(exc)[:140]}) — restoring the "
-                     f"previous stop", topic="monitor")
+            self.log("error", bot,
+                     f"{symbol}: stop move ({tag}) failed ({str(exc)[:140]}) — restoring "
+                     f"the previous stop", topic="monitor")
             restored = False
             with contextlib.suppress(Exception):
                 if old_order:
-                    back = await self.hub.stop_market(
-                        symbol, "SELL" if side == "LONG" else "BUY", prev_stop,
-                        close_position=True, client_id=f"SRtr{int(time.time())}b")
+                    back = await self.hub.stop_market(symbol, close_side, prev_stop,
+                                                      close_position=True,
+                                                      client_id=f"SR{tag}{int(time.time())}b")
                     trade["sl_order_id"] = back.order_id
                     await DB.update_trade(int(trade["id"]), {"sl_order_id": back.order_id})
                     restored = True
             if not restored:
                 # never hold an unprotected position: if we cannot put a stop
                 # back, flatten now rather than trade naked
-                self.log("sos", bot_id or "monitor-team",
-                         f"{symbol}: no stop could be placed after the trail failed — "
-                         f"flattening to stay protected")
+                self.log("sos", bot,
+                         f"{symbol}: no stop could be placed after the {tag} stop move "
+                         f"failed — flattening to stay protected")
                 await self._close_trade(int(trade["id"]), "protection_lost")
-            return
+            return False
 
-        armed_now = not bool(trade.get("trail_active"))
-        patch = {"sl_price": stop, "trail_stop": stop, "trail_active": 1,
+        patch = {"sl_price": new_stop,
                  "sl_order_id": order.order_id if order else old_order}
+        if patch_extra:
+            patch.update(patch_extra)
         trade.update(patch)
         trade["notes"] = self._notes_with(trade, sl_order_id=patch["sl_order_id"])
         with contextlib.suppress(Exception):
             await DB.update_trade(int(trade["id"]), {**patch, "notes": trade["notes"]})
         with contextlib.suppress(Exception):
-            await DB.add_trade_event(int(trade["id"]), "trail",
-                                     {"stop": stop, "peak": peak, "peak_roi": round(peak_roi, 3),
-                                      "locked_roi": round(locked_roi, 3),
-                                      "armed": armed_now})
-        icon = "🔒" if armed_now else "⤴"
-        self.log("success", bot_id or "monitor-team",
-                 f"{symbol}: {icon} ROI trail {'armed' if armed_now else 'raised'} — peak "
-                 f"+{peak_roi:.1f}% ROI, stop {stop:.8g} locks +{locked_roi:.1f}% ROI "
-                 f"(rule: arm {activation:.0f}%, trail {distance:.0f} pts)",
-                 {"trade_id": trade["id"], "stop": stop, "peak": peak,
-                  "peak_roi": round(peak_roi, 3), "locked_roi": round(locked_roi, 3)},
-                 topic="monitor")
-        self.registry.set_status(bot_id or "monitor-team", "success",
-                                 f"trail on {symbol}",
-                                 message=f"stop locks +{locked_roi:.1f}% ROI "
-                                         f"(peak +{peak_roi:.1f}%)")
-        self.registry.set_mood("guardian-bot", "happy", 20)
-        BUS.publish("trade.trail", {"trade_id": trade["id"], "symbol": symbol,
-                                    "stop": stop, "peak": peak,
-                                    "peak_roi": round(peak_roi, 3),
-                                    "locked_roi": round(locked_roi, 3),
-                                    "armed": armed_now})
+            await DB.add_trade_event(int(trade["id"]), event_kind, event_meta)
+        self.log("success", bot, log_msg, log_payload, topic="monitor")
+        if status_msg:
+            self.registry.set_status(bot, "success", f"{event_kind} on {symbol}",
+                                     message=status_msg)
+        BUS.publish(f"trade.{event_kind}",
+                    {"trade_id": trade["id"], "symbol": symbol, **event_meta})
+        return True
+
+    async def _breakeven_tick(self, trade: dict, pos: Position, mark: float,
+                              bot_id: str = "") -> None:
+        """
+        Strategy v2 — break-even ratchet.
+
+        Once the trade is up `breakeven_r` R, move the single protective stop
+        to entry ± `breakeven_offset_atr` × ATR, so a trade that ran a full R
+        and then round-trips closes at ~break-even instead of paying the whole
+        stop.  The candidate only ever tightens the existing stop (it never
+        loosens it) and the ROI trail keeps ratcheting on top of it, so the
+        "one stop order, tighten only" invariant holds for both layers.
+        """
+        cfg = self.store.cfg.strategy
+        if not cfg.v2_enabled or not cfg.breakeven_enabled:
+            return
+        symbol = trade["symbol"]
+        side = trade["side"]
+        entry = float(trade["entry_price"])
+        if float(trade["qty"]) <= 0 or symbol in self.pending_close:
+            return
+        try:
+            notes = json.loads(trade.get("notes") or "{}")
+        except (TypeError, ValueError):
+            notes = {}
+        if notes.get("be_done"):
+            return                              # the ratchet only fires once
+        sl0 = float(notes.get("sl_distance0") or 0.0)
+        atr = float(notes.get("atr") or 0.0)
+        if sl0 <= 0 or atr <= 0:
+            return
+        prev_stop = float(trade.get("sl_price") or 0.0)
+        cand = breakeven_stop(side=side, entry=entry, mark=mark, atr=atr,
+                              sl_distance=sl0, current_stop=prev_stop, cfg=cfg)
+        if cand is None:
+            return
+        flt = self.hub.filters.get(symbol)
+        if flt:
+            cand = round_tick(cand, flt.tick_size)
+            if (side == "LONG" and cand <= prev_stop) or \
+                    (side == "SHORT" and cand >= prev_stop):
+                return                          # tick rounding ate the improvement
+        r_now = r_progress(side, entry, mark, sl0)
+        moved = await self._apply_stop_move(
+            trade, pos, cand, tag="be", prev_stop=prev_stop,
+            event_kind="breakeven",
+            event_meta={"stop": cand, "r": round(r_now, 3)},
+            log_msg=(f"{symbol}: 🛡 break-even ratchet — up {r_now:+.2f} R, stop moved "
+                     f"{prev_stop:.8g} → {cand:.8g} "
+                     f"(entry locked, {cfg.breakeven_offset_atr:g}×ATR in)"),
+            log_payload={"trade_id": trade["id"], "stop": cand, "r": round(r_now, 3)},
+            status_msg=f"break-even armed at {cand:.8g} (R {r_now:+.2f})",
+            bot_id=bot_id)
+        if moved:
+            trade["notes"] = self._notes_with(trade, be_done=1)
+            with contextlib.suppress(Exception):
+                await DB.update_trade(int(trade["id"]), {"notes": trade["notes"]})
+            self.registry.set_mood("warden-bot", "happy", 15)
+
+    async def _time_stop_tick(self, trade: dict, mark: float, bot_id: str = "") -> None:
+        """
+        Strategy v2 — time stop.
+
+        A position that has held `time_stop_bars` bars without
+        `time_stop_min_r` R of progress is closed at market: dead trades are
+        usually just late losers, and cutting them frees the slot, the margin
+        budget and the second fee leg.
+        """
+        cfg = self.store.cfg.strategy
+        if not cfg.v2_enabled or not cfg.time_stop_enabled:
+            return
+        symbol = trade["symbol"]
+        if symbol in self.pending_close:
+            return
+        side = trade["side"]
+        entry = float(trade["entry_price"])
+        try:
+            notes = json.loads(trade.get("notes") or "{}")
+        except (TypeError, ValueError):
+            notes = {}
+        sl0 = float(notes.get("sl_distance0") or 0.0)
+        if sl0 <= 0:
+            return
+        bar_ms = tf_ms(self.store.cfg.engine.monitored_timeframe)
+        bars_elapsed = (now_ms() - int(trade.get("opened_at") or 0)) / bar_ms
+        r_now = r_progress(side, entry, mark, sl0)
+        if not time_stop_due(bars_elapsed=bars_elapsed, r_now=r_now, cfg=cfg):
+            return
+        self.log("info", bot_id or "monitor-team",
+                 f"{symbol}: time stop — {bars_elapsed:.0f} bars with {r_now:+.2f} R "
+                 f"(< {cfg.time_stop_min_r:g} R) — closing at market", topic="monitor")
+        await self._close_trade(int(trade["id"]), "time_stop",
+                                reason_detail=(f"no progress after {bars_elapsed:.0f} bars "
+                                               f"(R {r_now:+.2f} < {cfg.time_stop_min_r:g})"))
 
     @staticmethod
     def _notes_with(trade: dict, **values: Any) -> str:
@@ -1716,10 +1906,18 @@ class TradingEngine:
             if side == "SHORT" and exit_price <= tp * 1.001:
                 return "tp"
         if sl and exit_price > 0:
-            if side == "LONG" and exit_price <= sl * 1.001:
-                return "trail" if trade.get("trail_active") else "sl"
-            if side == "SHORT" and exit_price >= sl * 0.999:
-                return "trail" if trade.get("trail_active") else "sl"
+            hit_stop = (side == "LONG" and exit_price <= sl * 1.001) or \
+                (side == "SHORT" and exit_price >= sl * 0.999)
+            if hit_stop:
+                if trade.get("trail_active"):
+                    return "trail"
+                try:
+                    notes = json.loads(trade.get("notes") or "{}")
+                except (TypeError, ValueError):
+                    notes = {}
+                if notes.get("be_done"):
+                    return "breakeven"
+                return "sl"
         return "manual" if not orders_cancelled else "sl_or_tp"
 
     # ============================================================ maintenance
@@ -1928,6 +2126,15 @@ class TradingEngine:
             "signals_seen": self.signals_seen,
             "started_at": self.started_at,
             "risk": self.risk.effective_exits(),
+            "strategy": {
+                "v2_enabled": self.store.cfg.strategy.v2_enabled,
+                "adx_min": self.store.cfg.strategy.adx_min,
+                "vol_expansion_min": self.store.cfg.strategy.vol_expansion_min,
+                "breakeven_enabled": self.store.cfg.strategy.breakeven_enabled,
+                "time_stop_enabled": self.store.cfg.strategy.time_stop_enabled,
+                "max_same_direction": self.store.cfg.strategy.max_same_direction,
+                "gate_rejections": dict(self.gate_rejections),
+            },
             "scanner_buckets": [len(b) for b in self.scanner_buckets],
             "links": workflow_links(),
             "office": self.registry.office_summary(),

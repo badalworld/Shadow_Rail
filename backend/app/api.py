@@ -374,6 +374,8 @@ async def scan_payload(e: TradingEngine) -> dict:
         "updated_at": snap.get("updated_at", 0),
         "universe": e.hub.universe,
         "by_bot": snap.get("by_bot", {}),
+        "gate_rejections": snap.get("gate_rejections", {}),
+        "strategy_v2_enabled": STORE.cfg.strategy.v2_enabled,
         "opportunities": e.recent_analyst_rows[:40],
         "seconds_to_close": round(e.hub.seconds_to_close(), 1),
         "timeframe": STORE.cfg.engine.monitored_timeframe,

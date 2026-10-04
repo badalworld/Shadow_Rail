@@ -130,6 +130,49 @@ def stdev(src, length: int) -> np.ndarray:
     return out
 
 
+def adx(high, low, close, length: int) -> np.ndarray:
+    """
+    Pine ta.dmi / ta.adx — Wilder's Average Directional Index.
+
+        upMove   = high - high[1]
+        downMove = low[1] - low
+        +DM      = upMove > downMove and upMove > 0 ? upMove : 0
+        -DM      = downMove > upMove and downMove > 0 ? downMove : 0
+        tr       = ta.tr(true)
+        +DI      = 100 * ta.rma(+DM, length) / ta.rma(tr, length)
+        -DI      = 100 * ta.rma(-DM, length) / ta.rma(tr, length)
+        dx       = 100 * abs(+DI - -DI) / (+DI + -DI)
+        adx      = ta.rma(dx, length)
+
+    Not part of the Ghost Candle port — a Strategy-layer primitive (used by
+    the entry trend-strength gate).
+    """
+    h, l, c = _as_array(high), _as_array(low), _as_array(close)
+    n = len(h)
+    out = np.full(n, np.nan)
+    if length <= 1 or n < 2:
+        return out
+    up_move = np.full(n, 0.0)
+    dn_move = np.full(n, 0.0)
+    for i in range(1, n):
+        up_move[i] = h[i] - h[i - 1]
+        dn_move[i] = l[i - 1] - l[i]
+    pos_dm = np.where((up_move > dn_move) & (up_move > 0), up_move, 0.0)
+    neg_dm = np.where((dn_move > up_move) & (dn_move > 0), dn_move, 0.0)
+    tr = true_range(h, l, c)
+    tr_r = rma(tr, length)
+    pos_dm_r = rma(pos_dm, length)          # each rma computed exactly once
+    neg_dm_r = rma(neg_dm, length)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        pos_di = np.where((tr_r > 0) & ~np.isnan(tr_r), 100.0 * pos_dm_r / tr_r, np.nan)
+        neg_di = np.where((tr_r > 0) & ~np.isnan(tr_r), 100.0 * neg_dm_r / tr_r, np.nan)
+    dx = np.full(n, np.nan)
+    denom = pos_di + neg_di
+    valid = (~np.isnan(pos_di)) & (~np.isnan(neg_di)) & (denom > 0)
+    dx[valid] = 100.0 * np.abs(pos_di[valid] - neg_di[valid]) / denom[valid]
+    return rma(dx, length)
+
+
 def true_range(high, low, close) -> np.ndarray:
     h, l, c = _as_array(high), _as_array(low), _as_array(close)
     n = len(h)

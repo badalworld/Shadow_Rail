@@ -183,6 +183,7 @@ async def test_the_trail_stop_closes_the_trade_and_is_labelled_trail(db, store):
 async def test_trail_is_disabled_when_the_operator_turns_it_off(db, store):
     eng = await make_engine(store, universe=12)
     store.cfg.risk.trail_roi_enabled = False
+    store.cfg.strategy.breakeven_enabled = False     # isolate the trail under test
     store.save()
     trade = await _open(eng)
     step = roi_price_step(float(trade["margin"]), float(trade["qty"]))

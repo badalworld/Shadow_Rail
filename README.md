@@ -52,6 +52,54 @@ the position has seen** — so it starts at **+10 % ROI** and only ever ratchets
 Activation, distance and step are editable in **Settings → Risk / TP-SL**. A trailed exit is
 journalled with `close_reason = trail`, so the history shows exactly how much was protected.
 
+### Strategy v2 — the win-rate layer
+
+The base GCSR system is kept exactly as specified. **Strategy v2** (`app/strategy.py`,
+config section `strategy`, **Settings → Strategy v2**) adds *veto-able* layers on top.
+Every layer only ever **removes** trades or **tightens** the one protective stop — it never
+adds a second order and never loosens risk.
+
+**Entry gates** (a flip that fails one is skipped, nothing is traded):
+* **Trend strength** — 5m Wilder **ADX(14) ≥ 25**. Flip systems whipsaw in flat tape.
+* **Volatility regime** — current ATR% must be ≥ **1.1× its 200-bar median** (volatility
+  expansion, not a dead tape).
+* **Momentum alignment** — the 5m close must sit on the signal side of its own EMA-20.
+
+**Exit layers** (each only tightens the single stop; journalled as `breakeven` / `time_stop`):
+* **Break-even ratchet** — at **+1 R** the stop jumps to entry + 0.3×ATR (above the round-trip
+  fee, so a full round-trip books a small *win*, not a loss). The ROI trail keeps ratcheting on top.
+* **Time stop** — no +0.3 R progress after 24 bars (2 h) → market-close the dead trade.
+
+**Portfolio layers:**
+* **Direction crowding** — at most **5** open positions per direction.
+* **Symbol veto** — a symbol with ≥ 4 closed trades and < 35 % win rate is hard-rejected.
+
+Defaults are the "selective" values from the backtester sweep. **Settings → Strategy v2**
+carries two one-click presets (*Selective* / *Win-rate focused (strict)*, which also sets
+confidence 70 and TP 2.5×ATR in the Risk tab). Master switch off = the pure GCSR baseline,
+so you can A/B from the dashboard.
+
+**Backtester** (deterministic, reuses the live indicator + risk maths on the simulator's
+price model — *synthetic data*, not real market history):
+
+```bash
+.venv/bin/python scripts/backtest.py              # 150 symbols × 12 000 bars (41 d)
+.venv/bin/python scripts/backtest.py --quick      # 30 × 4 000 (fast smoke)
+.venv/bin/python scripts/backtest.py --sweep      # + v2 settings grid
+```
+
+On the 150×12 000-bar (41-day) replay with the shipped defaults the layer raised the win
+rate **40.4 % → 49.4 %**, cut the trade count **8 255 → 539** (−94 %), the max drawdown
+**100 % → 59.7 %** and preserved **$5 093 of the $10 k** account where the baseline went
+to $0.07. The `--sweep` grid (see `data/backtest/report_full.md`) shows the win rate keeps
+rising with selectivity (up to ~58 % on the strict preset, short window) — pick your row,
+then validate.
+
+The honest caveat, repeated in every report: on the *synthetic* market the tight 5m stop
+is still fee-dominated (profit factor < 1 for every variant), so **validate on Binance
+testnet / paper mode before any real size** — the simulator is not a reliable proxy for
+real crypto microstructure.
+
 ---
 
 ## Quick start

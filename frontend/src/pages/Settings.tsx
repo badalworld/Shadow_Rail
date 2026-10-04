@@ -1,17 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
-  Activity, CheckCircle2, Copy, Globe, KeyRound, RefreshCw, Save, ShieldAlert, Sliders, Waves, XCircle,
+  Activity, CheckCircle2, Copy, Globe, KeyRound, RefreshCw, Save, ShieldAlert, Sliders, TrendingUp, Waves, XCircle,
 } from 'lucide-react'
 import { endpoints } from '../lib/api'
 import { BOOT, useStore } from '../state/store'
 import { Bar, Chip, Panel } from '../components/Glass'
 
-type Tab = 'api' | 'risk' | 'indicator' | 'engine' | 'danger'
+type Tab = 'api' | 'risk' | 'strategy' | 'indicator' | 'engine' | 'danger'
 
 const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
   { key: 'api', label: 'Binance API & IP', icon: <KeyRound size={14} /> },
   { key: 'risk', label: 'Risk / TP-SL', icon: <ShieldAlert size={14} /> },
+  { key: 'strategy', label: 'Strategy v2', icon: <TrendingUp size={14} /> },
   { key: 'indicator', label: 'Indicator', icon: <Waves size={14} /> },
   { key: 'engine', label: 'Engine & Swarm', icon: <Sliders size={14} /> },
   { key: 'danger', label: 'Advanced', icon: <Activity size={14} /> },
@@ -44,12 +45,34 @@ export const Settings: React.FC = () => {
   const patch = (section: string, key: string, value: any) =>
     setCfg((prev: any) => ({ ...prev, [section]: { ...prev[section], [key]: value } }))
 
+  const applyPreset = (kind: 'selective' | 'strict') => {
+    setCfg((prev: any) => {
+      const next: any = { ...prev }
+      next.strategy = { ...prev.strategy, v2_enabled: true, adx_min: 25, vol_expansion_min: 1.1 }
+      if (kind === 'strict') {
+        next.risk = {
+          ...prev.risk, min_confidence: 70, risk_mode: 'custom',
+          custom_sl_atr_mult: 1.5, custom_tp_atr_mult: 2.5, custom_tp_enabled: true,
+        }
+      } else {
+        next.risk = { ...prev.risk, min_confidence: 60, risk_mode: 'indicator_default' }
+      }
+      return next
+    })
+    pushToast({
+      kind: 'info',
+      title: `Preset staged: ${kind === 'strict' ? 'win-rate focused (strict)' : 'selective'}`,
+      body: 'Strategy + Risk settings staged — press "save all settings" to apply',
+    })
+  }
+
   const save = async () => {
     setSaving(true)
     try {
       const body: any = {
         binance: { ...cfg.binance, api_key: apiKey, api_secret: apiSecret },
-        risk: cfg.risk, indicator: cfg.indicator, engine: cfg.engine, ui: cfg.ui,
+        risk: cfg.risk, strategy: cfg.strategy,
+        indicator: cfg.indicator, engine: cfg.engine, ui: cfg.ui,
       }
       delete body.binance.api_key_masked
       delete body.binance.api_secret_masked
@@ -456,6 +479,201 @@ export const Settings: React.FC = () => {
                 <div className="mt-1 text-[0.6rem] dim">
                   {(cfg.risk.size_pct_per_trade * cfg.risk.leverage * cfg.risk.max_concurrent_trades / 100).toFixed(1)}×
                   equity notional if all {cfg.risk.max_concurrent_trades} slots fill
+                </div>
+              </div>
+            </Panel>
+          </div>
+        )}
+
+        {/* ══════════════════════ STRATEGY V2 ══════════════════════ */}
+        {tab === 'strategy' && (
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+            <Panel title="Presets — from the backtester sweep" bodyClass="p-4">
+              <div className="flex flex-col gap-3">
+                <div className="glass-solid p-3 text-[0.68rem] leading-relaxed dim">
+                  On the 150-symbol × 41-day replay, more selective settings raised the
+                  win rate from 40.6% (baseline) toward ~48–49% and cut the max drawdown
+                  from 100% to under 50%. Stages a full config (Strategy + Risk tab);
+                  press <span className="mono">save all settings</span> to apply.
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button className="chip hover:opacity-80" style={{ cursor: 'pointer' }}
+                    onClick={() => applyPreset('selective')}>
+                    Selective (recommended default)
+                  </button>
+                  <button className="chip hover:opacity-80" style={{ cursor: 'pointer', borderColor: 'var(--sr-accent)', color: 'var(--sr-accent)' }}
+                    onClick={() => applyPreset('strict')}>
+                    Win-rate focused (strict)
+                  </button>
+                </div>
+                <div className="mono text-[0.62rem] dim">
+                  selective: v2 on · ADX ≥ 25 · vol ≥ 1.1× median · TP 3.0×ATR · confidence 60
+                  <br />
+                  strict: v2 on · ADX ≥ 25 · vol ≥ 1.1× median · TP 2.5×ATR · confidence 70
+                </div>
+              </div>
+            </Panel>
+
+            <Panel title="Win-rate layer — master switch" bodyClass="p-4">
+              <div className="flex flex-col gap-3">
+                <div className="glass-solid p-3 text-[0.68rem] leading-relaxed dim">
+                  Strategy v2 adds <span className="accent-text">veto-able filters</span> on top of the
+                  Ghost Candle system: it decides <em>which</em> flips to trade (entry gates), keeps
+                  winners from round-tripping (break-even ratchet), cuts dead trades (time stop) and
+                  caps correlated exposure (crowding + symbol veto). The base indicator, confidence
+                  model and TP/SL system are untouched. Turn it off to A/B against the pure GCSR
+                  system.
+                </div>
+                <label className="flex items-center gap-2 text-[0.72rem]">
+                  <input type="checkbox" checked={!!cfg.strategy.v2_enabled}
+                    onChange={(e) => patch('strategy', 'v2_enabled', e.target.checked)} />
+                  <span className="font-semibold">Strategy v2 enabled</span>
+                  <span className="dim">({cfg.strategy.v2_enabled ? 'layers active' : 'pure GCSR baseline'})</span>
+                </label>
+              </div>
+            </Panel>
+
+            <Panel title="Entry gates — which flips to trade" bodyClass="p-4">
+              <div className="flex flex-col gap-3">
+                <div className="glass-solid p-3">
+                  <div className="mb-2 flex items-center justify-between text-[0.72rem]">
+                    <span className="font-semibold">Trend strength (ADX)</span>
+                    <label className="flex items-center gap-2 dim">
+                      <input type="checkbox" checked={!!cfg.strategy.adx_filter}
+                        onChange={(e) => patch('strategy', 'adx_filter', e.target.checked)} />
+                      on
+                    </label>
+                  </div>
+                  <div className="mb-2 text-[0.66rem] dim">
+                    Skip flips when the 5m ADX is below threshold — flip systems whipsaw in flat,
+                    choppy tape.
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Num label="ADX minimum" value={cfg.strategy.adx_min ?? 20} step={1}
+                      onChange={(v) => patch('strategy', 'adx_min', v)} />
+                    <Num label="ADX length (bars)" value={cfg.strategy.adx_length ?? 14} step={1}
+                      onChange={(v) => patch('strategy', 'adx_length', v)} />
+                  </div>
+                </div>
+                <div className="glass-solid p-3">
+                  <div className="mb-2 flex items-center justify-between text-[0.72rem]">
+                    <span className="font-semibold">Volatility regime</span>
+                    <label className="flex items-center gap-2 dim">
+                      <input type="checkbox" checked={!!cfg.strategy.vol_regime_filter}
+                        onChange={(e) => patch('strategy', 'vol_regime_filter', e.target.checked)} />
+                      on
+                    </label>
+                  </div>
+                  <div className="mb-2 text-[0.66rem] dim">
+                    Only trade when the current ATR% is at least this multiple of its own trailing
+                    median — flips earn their keep on volatility expansion, not a dead tape.
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Num label="Expansion × median" value={cfg.strategy.vol_expansion_min ?? 1} step={0.05}
+                      onChange={(v) => patch('strategy', 'vol_expansion_min', v)} />
+                    <Num label="Median lookback (bars)" value={cfg.strategy.vol_regime_bars ?? 200} step={10}
+                      onChange={(v) => patch('strategy', 'vol_regime_bars', v)} />
+                  </div>
+                </div>
+                <div className="glass-solid p-3">
+                  <div className="mb-2 flex items-center justify-between text-[0.72rem]">
+                    <span className="font-semibold">Momentum alignment</span>
+                    <label className="flex items-center gap-2 dim">
+                      <input type="checkbox" checked={!!cfg.strategy.momentum_filter}
+                        onChange={(e) => patch('strategy', 'momentum_filter', e.target.checked)} />
+                      on
+                    </label>
+                  </div>
+                  <div className="mb-2 text-[0.66rem] dim">
+                    The 5m close must sit on the signal side of its own EMA, so the entry follows
+                    the short-term impulse instead of fading it.
+                  </div>
+                  <Num label="Momentum EMA (bars)" value={cfg.strategy.momentum_ema_bars ?? 20} step={1}
+                    onChange={(v) => patch('strategy', 'momentum_ema_bars', v)} />
+                </div>
+              </div>
+            </Panel>
+
+            <Panel title="Exit layers — protect what you won" bodyClass="p-4">
+              <div className="flex flex-col gap-3">
+                <div className="glass-solid p-3">
+                  <div className="mb-2 flex items-center justify-between text-[0.72rem]">
+                    <span className="font-semibold">Break-even ratchet</span>
+                    <label className="flex items-center gap-2 dim">
+                      <input type="checkbox" checked={!!cfg.strategy.breakeven_enabled}
+                        onChange={(e) => patch('strategy', 'breakeven_enabled', e.target.checked)} />
+                      on
+                    </label>
+                  </div>
+                  <div className="mb-2 text-[0.66rem] dim">
+                    Once a trade is up the trigger distance (in R = distance to its initial stop),
+                    the single protective stop moves just past entry — so a full round-trip books a
+                    small win instead of the whole stop. It only ever tightens the stop; the ROI
+                    trail keeps ratcheting on top of it.
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Num label="Arm after R" value={cfg.strategy.breakeven_r ?? 1} step={0.1}
+                      onChange={(v) => patch('strategy', 'breakeven_r', v)} />
+                    <Num label="Offset past entry (×ATR)" value={cfg.strategy.breakeven_offset_atr ?? 0.3} step={0.05}
+                      onChange={(v) => patch('strategy', 'breakeven_offset_atr', v)} />
+                  </div>
+                </div>
+                <div className="glass-solid p-3">
+                  <div className="mb-2 flex items-center justify-between text-[0.72rem]">
+                    <span className="font-semibold">Time stop</span>
+                    <label className="flex items-center gap-2 dim">
+                      <input type="checkbox" checked={!!cfg.strategy.time_stop_enabled}
+                        onChange={(e) => patch('strategy', 'time_stop_enabled', e.target.checked)} />
+                      on
+                    </label>
+                  </div>
+                  <div className="mb-2 text-[0.66rem] dim">
+                    A position that has not made the minimum progress after the given bars is
+                    market-closed: dead trades are usually just late losers paying the second fee
+                    leg.
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Num label="Bars to show progress" value={cfg.strategy.time_stop_bars ?? 24} step={1}
+                      onChange={(v) => patch('strategy', 'time_stop_bars', v)} />
+                    <Num label="Minimum progress (R)" value={cfg.strategy.time_stop_min_r ?? 0.3} step={0.05}
+                      onChange={(v) => patch('strategy', 'time_stop_min_r', v)} />
+                  </div>
+                </div>
+              </div>
+            </Panel>
+
+            <Panel title="Portfolio layers — cap correlated risk" bodyClass="p-4">
+              <div className="flex flex-col gap-3">
+                <div className="glass-solid p-3">
+                  <div className="mb-2 text-[0.72rem] font-semibold">Direction crowding</div>
+                  <div className="mb-2 text-[0.66rem] dim">
+                    At most this many open positions per direction. Ten correlated alts all in the
+                    same direction is one trade, not ten — a single flush against the crowd must not
+                    hit the whole book.
+                  </div>
+                  <Num label="Max open per direction (0 = off)" value={cfg.strategy.max_same_direction ?? 5} step={1}
+                    onChange={(v) => patch('strategy', 'max_same_direction', v)} />
+                </div>
+                <div className="glass-solid p-3">
+                  <div className="mb-2 text-[0.72rem] font-semibold">Symbol veto</div>
+                  <div className="mb-2 text-[0.66rem] dim">
+                    A symbol with at least the minimum closed trades and a win rate below the
+                    ceiling is hard-rejected, not just scored down. A sample size is required so one
+                    early loss cannot black-list a name.
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Num label="Min trades before veto" value={cfg.strategy.symbol_veto_min_trades ?? 4} step={1}
+                      onChange={(v) => patch('strategy', 'symbol_veto_min_trades', v)} />
+                    <Num label="Veto below win rate (%)" value={cfg.strategy.symbol_veto_max_win_rate ?? 35} step={1}
+                      onChange={(v) => patch('strategy', 'symbol_veto_max_win_rate', v)} />
+                  </div>
+                </div>
+                <div className="glass-solid p-3 text-[0.66rem] leading-relaxed dim">
+                  <div className="mb-1 text-[0.62rem] uppercase tracking-wider">how to read the effect</div>
+                  Every layer is a veto: it only removes trades, never adds them. Expect far fewer,
+                  higher-quality entries and a smaller drawdown. Validate on testnet / paper mode
+                  before sizing up — the backtester (<span className="mono">scripts/backtest.py</span>)
+                  compares v1 vs v2 on identical synthetic data.
                 </div>
               </div>
             </Panel>

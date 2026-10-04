@@ -97,6 +97,9 @@ class GhostSeries:
     target_lvl: np.ndarray
     warmup_bars: int = 0
     params: GhostParams = field(default_factory=GhostParams)
+    # Strategy-v2 series (app.strategy.StrategySignals), attached by the
+    # engine after compute() when the win-rate layer is enabled.
+    strategy: Any | None = None
 
     # ------------------------------------------------------------ helpers
     @property
