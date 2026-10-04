@@ -233,22 +233,37 @@ class Journal:
         return stats
 
     async def feature_rows(self) -> list[dict]:
-        """Extract (features → outcome) rows from the journal for model training."""
+        """Extract (factors → outcome) rows from the journal for model training.
+
+        Prefers the *scored* factor vector the analysts produced (0–100, the
+        same space the scorer and the logistic model live in) and falls back
+        to the raw signal features for rows written before the v2 journal.
+        Rows with `pnl_source = unknown` are skipped: an unattributed outcome
+        teaches nothing and must not bias the model.
+        """
         import json
         cur = await DB.conn.execute(
-            "SELECT notes, net_pnl, signal_confidence FROM trades "
+            "SELECT notes, net_pnl, signal_confidence, pnl_source FROM trades "
             "WHERE status='closed' AND notes IS NOT NULL")
         rows = await cur.fetchall()
         await cur.close()
         out: list[dict] = []
         for r in rows:
+            if (r["pnl_source"] or "fills") == "unknown":
+                continue
             try:
                 notes = json.loads(r["notes"]) if isinstance(r["notes"], str) else (r["notes"] or {})
             except (TypeError, ValueError):
                 continue
-            feats = notes.get("features") if isinstance(notes, dict) else None
+            if not isinstance(notes, dict):
+                continue
+            factors = notes.get("factors") if isinstance(notes.get("factors"), dict) else None
+            feats = factors or (notes.get("features") if isinstance(notes.get("features"), dict) else None)
             if feats:
-                out.append({"features": feats, "win": 1 if (r["net_pnl"] or 0) > 0 else 0})
+                row = {"features": feats, "win": 1 if (r["net_pnl"] or 0) > 0 else 0}
+                if factors:
+                    row["factors"] = factors
+                out.append(row)
         return out
 
     # ------------------------------------------------------------ snapshots

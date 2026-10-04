@@ -39,6 +39,8 @@ GLOW_BARS = 200       # halo width ATR length
 OFFSET_ATR_BARS = 14  # ghost gap ATR length
 RISK_ATR_BARS = 14    # stop/target ATR length
 TIER_HIGH = 0.60      # quality at or above = strong flip
+VOL_SURVEY_BARS = 20  # context bars behind the flip-bar volume (win-rate pack)
+HTF_SLOPE_BARS = 3    # HTF EMA slope horizon (win-rate pack)
 
 
 @dataclass
@@ -86,6 +88,9 @@ class GhostSeries:
     atr14: np.ndarray
     htf_bull: np.ndarray         # 1 = HTF above its EMA (mapped to base bars)
     htf_ready: np.ndarray        # True once the HTF EMA is actually warm
+    htf_ema_up: np.ndarray       # 1/0 = HTF EMA rising/falling (NaN when gate off)
+    vol_surge: np.ndarray        # flip-bar volume ÷ SMA(volume) — participation
+    body_strength: np.ndarray    # (close-open)/(high-low), signed; commitment
     raw_turn_up: np.ndarray
     raw_turn_dn: np.ndarray
     turn_up: np.ndarray
@@ -128,19 +133,22 @@ class GhostSeries:
 
 # ──────────────────────────────────────────────────────────────────────── #
 def _htf_bull_map(candles: Sequence[Candle], base_tf: str, htf: str,
-                  ema_len: int) -> tuple[np.ndarray, int]:
+                  ema_len: int) -> tuple[np.ndarray, np.ndarray, int]:
     """
     Implementation of the request.security HTF gate.
 
-    Returns (bull_flags_per_base_bar, ready_index).  `ready_index` is the first
-    base bar at which the HTF EMA is actually defined — before it the gate would
-    silently reject every counter-directional flip, so the engine refuses to
-    trade that symbol instead of taking a one-sided bias.
+    Returns (bull_flags_per_base_bar, ema_up_flags_per_base_bar, ready_index).
+    ``ready_index`` is the first base bar at which the HTF EMA is actually
+    defined — before it the gate would silently reject every counter-directional
+    flip, so the engine refuses to trade that symbol instead of taking a
+    one-sided bias.  ``ema_up`` is the HTF EMA slope confluence (win-rate pack):
+    EMA(previous bar) rising over ``HTF_SLOPE_BARS`` HTF bars.
     """
     n = len(candles)
     out = np.zeros(n, dtype=float)
+    out_up = np.full(n, np.nan)
     if n == 0:
-        return out, n
+        return out, out_up, n
     base_ms = tf_ms(base_tf)
     htf_ms = tf_ms(htf)
     if htf_ms <= base_ms:
@@ -159,15 +167,20 @@ def _htf_bull_map(candles: Sequence[Candle], base_tf: str, htf: str,
         else:
             closes[-1] = c.c
     if not closes:
-        return out, n
+        return out, out_up, n
     close_arr = np.asarray(closes, dtype=float)
     ema_arr = P.ema(close_arr, ema_len)
     bull = np.zeros(len(closes), dtype=bool)
+    ema_up = np.zeros(len(closes), dtype=bool)
     first_valid = None
     for k in range(len(closes)):
         # close[1] > ema(close, len)[1]  → previous HTF bar values
         if k >= 1 and not np.isnan(ema_arr[k - 1]):
             bull[k] = close_arr[k - 1] > ema_arr[k - 1]
+            prev_ref = k - 1 - HTF_SLOPE_BARS
+            ref_val = ema_arr[prev_ref] if prev_ref >= 0 else ema_arr[0]
+            if not np.isnan(ref_val):
+                ema_up[k] = ema_arr[k - 1] > ref_val
             if first_valid is None:
                 first_valid = k
 
@@ -178,7 +191,9 @@ def _htf_bull_map(candles: Sequence[Candle], base_tf: str, htf: str,
         bar_close = c.t + base_ms          # bucket k covers [k*htf_ms, (k+1)*htf_ms)
         while k + 1 < len(buckets) and (buckets[k + 1] + 1) * htf_ms <= bar_close:
             k += 1
-        out[i] = 1.0 if (k >= 0 and bull[k]) else 0.0
+        if k >= 0:
+            out[i] = 1.0 if bull[k] else 0.0
+            out_up[i] = 1.0 if ema_up[k] else 0.0
     ready_index = n
     if first_valid is not None:
         need = (buckets[first_valid] + 1) * htf_ms
@@ -186,7 +201,7 @@ def _htf_bull_map(candles: Sequence[Candle], base_tf: str, htf: str,
             if c.t + base_ms >= need:
                 ready_index = i
                 break
-    return out, ready_index
+    return out, out_up, ready_index
 
 
 # ──────────────────────────────────────────────────────────────────────── #
@@ -380,14 +395,26 @@ def compute(candles: Sequence[Candle], params: GhostParams | None = None,
         raw_dn[i] = trend[i] == -1 and trend[i - 1] == 1
 
     if p.mtfGate:
-        htf_bull, htf_ready_from = _htf_bull_map(candles, base_tf, p.mtfFrame,
-                                                 int(p.mtfEmaBars))
+        htf_bull, htf_ema_up, htf_ready_from = _htf_bull_map(candles, base_tf, p.mtfFrame,
+                                                              int(p.mtfEmaBars))
         htf_ready = np.zeros(n, dtype=bool)
         if htf_ready_from < n:
             htf_ready[htf_ready_from:] = True
     else:
         htf_bull = np.ones(n, dtype=float)
+        htf_ema_up = np.full(n, np.nan)      # gate off → no slope opinion at all
         htf_ready = np.ones(n, dtype=bool)
+
+    # ── win-rate-pack confluence measures (additive, not part of the Pine) ──
+    vol_sma = P.sma(P.nz(v, 0.0), VOL_SURVEY_BARS)
+    vol_surge = np.full(n, np.nan)
+    body_strength = np.full(n, np.nan)
+    for i in range(n):
+        if not np.isnan(vol_sma[i]) and vol_sma[i] > 0:
+            vol_surge[i] = v[i] / vol_sma[i]
+        rng = h[i] - l[i]
+        if rng > 0:
+            body_strength[i] = (cl[i] - o[i]) / rng
 
     turn_up = np.zeros(n, dtype=bool)
     turn_dn = np.zeros(n, dtype=bool)
@@ -430,6 +457,7 @@ def compute(candles: Sequence[Candle], params: GhostParams | None = None,
         flow_bias=flow_bias, top_ref=top_ref, bot_ref=bot_ref, shadow_lo=shadow_lo, shadow_hi=shadow_hi,
         ghost_open=ghost_o, ghost_close=ghost_c, ghost_top=ghost_top, ghost_bot=ghost_bot,
         glow_half=glow_half, atr14=atr14, htf_bull=htf_bull, htf_ready=htf_ready,
+        htf_ema_up=htf_ema_up, vol_surge=vol_surge, body_strength=body_strength,
         raw_turn_up=raw_up, raw_turn_dn=raw_dn, turn_up=turn_up, turn_dn=turn_dn,
         strong_up=strong_up, strong_dn=strong_dn,
         entry_lvl=entry_lvl, stop_lvl=stop_lvl, target_lvl=target_lvl,
@@ -452,6 +480,9 @@ def latest_signal(series: GhostSeries, i: int | None = None) -> dict[str, Any] |
     atr = float(series.atr14[i]) if not math.isnan(series.atr14[i]) else 0.0
     stop = float(series.stop_lvl[i]) if not math.isnan(series.stop_lvl[i]) else math.nan
     target = float(series.target_lvl[i]) if not math.isnan(series.target_lvl[i]) else math.nan
+    ema_up_val = (series.htf_ema_up[i] if i < len(series.htf_ema_up) else math.nan)
+    vs_val = series.vol_surge[i] if i < len(series.vol_surge) else math.nan
+    bs_val = series.body_strength[i] if i < len(series.body_strength) else math.nan
     return {
         "bar_time": int(series.times[i]),
         "direction": direction,
@@ -467,6 +498,10 @@ def latest_signal(series: GhostSeries, i: int | None = None) -> dict[str, Any] |
         "rail_distance_pct": ((entry - rail) / entry * 100.0) if rail and not math.isnan(rail) and entry else 0.0,
         "htf_bull": bool(series.htf_bull[i] == 1.0),
         "htf_ready": bool(series.htf_ready[i]),
+        # win-rate-pack confluence (None = no opinion, never a fake reject)
+        "htf_ema_up": (bool(ema_up_val == 1.0) if not math.isnan(ema_up_val) else None),
+        "vol_surge": (float(vs_val) if not math.isnan(vs_val) else None),
+        "body_strength": (float(bs_val) if not math.isnan(bs_val) else None),
         "volume": float(series.volume[i]),
         "htf_label": f"{series.params.mtfFrame}",
         "strong_flip": bool(series.strong_up[i] or series.strong_dn[i]),

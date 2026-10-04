@@ -48,6 +48,8 @@ class SizingPlan:
     risk_pct_equity: float = 0.0
     stop_clamped: bool = False
     risk_mode: str = "indicator_default"
+    size_multiplier: float = 1.0        # confidence sizing (win-rate pack)
+    be_lock_armed: bool = False         # break-even lock state at open time
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -131,6 +133,41 @@ def stop_loss_price(entry: float, side: str, atr: float, sl_mult: float) -> floa
     return entry + sl_mult * atr
 
 
+def breakeven_stop_price(*, entry: float, side: str, peak_price: float, mark: float,
+                         qty: float, margin: float, prev_stop: float,
+                         activation_roi: float, buffer_roi: float,
+                         mark_gap_pct: float = 0.0) -> tuple[float, bool]:
+    """
+    Break-even lock — the win-rate pack's loser-killer (runs before the trail,
+    on the *same* single stop order, same "only tighten" law as the ROI trail).
+
+    Once the position's peak ROI reaches ``activation_roi``, the stop is lifted
+    to ``entry ± buffer_roi`` ROI-points: a trade that stalls and reverses
+    leaves a scratch, not a stop-out.  Returns ``(stop_price, armed)``; armed
+    only when the move is an improvement over ``prev_stop`` and can be placed
+    without firing instantly (the mark-gap rule of the trail applies here too).
+    """
+    if qty <= 0 or margin <= 0:
+        return prev_stop, False
+    peak_roi = roi_points(entry, peak_price, qty, margin, side)
+    if peak_roi < activation_roi:
+        return prev_stop, False
+    step = roi_price_step(margin, qty)
+    if side == "LONG":
+        stop = entry + max(0.0, buffer_roi) * step
+        limit = mark * (1.0 - max(0.0, mark_gap_pct) / 100.0)
+        stop = min(stop, limit)
+        if stop <= prev_stop or stop < entry:   # must tighten, never sit in a loss
+            return prev_stop, False
+    else:
+        stop = entry - max(0.0, buffer_roi) * step
+        limit = mark * (1.0 + max(0.0, mark_gap_pct) / 100.0)
+        stop = max(stop, limit)
+        if stop >= prev_stop or stop > entry:   # must tighten, never sit in a loss
+            return prev_stop, False
+    return stop, True
+
+
 def take_profit_price(entry: float, side: str, atr: float, tp_mult: float) -> float:
     if side.upper() in ("LONG", "BUY"):
         return entry + tp_mult * atr
@@ -193,6 +230,14 @@ class RiskEngine:
 
         # ---- sizing -----------------------------------------------------
         margin = equity * (s.size_pct_per_trade / 100.0)
+        if s.confidence_sizing:
+            from .strategy import sizing_multiplier
+            mult = sizing_multiplier(confidence)
+            if mult != 1.0:
+                margin *= mult
+                plan.size_multiplier = mult
+                plan.warnings.append(
+                    f"confidence sizing: {confidence:.0f} score → margin ×{mult:.2f}")
         if s.max_margin_utilization_pct < 100.0:
             max_margin = equity * (s.max_margin_utilization_pct / 100.0)
             used = equity - available

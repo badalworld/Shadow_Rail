@@ -33,7 +33,9 @@ from .exchange.hub import MarketHub
 from .indicators import ghost
 from .journal import JOURNAL, Journal
 from .ratelimit import GOVERNOR, RateLimitHalt
-from .risk import RiskEngine, roi_points, roi_price_step, trail_stop_price
+from .risk import (RiskEngine, breakeven_stop_price, roi_points, roi_price_step,
+                   trail_stop_price)
+from . import strategy as ST
 from .util import now_ms, round_tick
 
 SCAN_TIMEOUT_S = 120
@@ -132,6 +134,8 @@ class TradingEngine:
         self.open_trades: dict[int, dict] = {}
         self.symbol_to_trade: dict[str, int] = {}
         self.cooldowns: dict[str, float] = {}
+        self.loss_streaks: dict[str, int] = {}       # win-rate pack: anti-tilt
+        self._blacklist: dict[str, int] = {}         # symbol → expiry ms
         self.series_cache: dict[str, tuple[int, Any]] = {}
         self.scanner_buckets: list[list[str]] = []
         self.symbol_monitor: dict[str, str] = {}
@@ -593,6 +597,7 @@ class TradingEngine:
         self.cycle += 1
         self.workflow["cycle"] = self.cycle
         self.last_scan_at = now_ms()
+        await self._refresh_blacklist()          # journal-driven exclusions
         t0 = time.time()
         self.registry.set_status("ceo-bot", "working", f"cycle #{self.cycle}",
                                  message="orchestrating the swarm", progress=0.05)
@@ -747,6 +752,55 @@ class TradingEngine:
         results.sort(key=lambda o: (o.tier == "strong", o.trend_quality), reverse=True)
         return results[:MAX_OPPORTUNITIES_PER_CYCLE]
 
+    # ── win-rate pack helpers ─────────────────────────────────────────────
+    async def _refresh_blacklist(self) -> None:
+        """
+        Symbols we keep trading and keep losing on are our leak, not our edge:
+        skip their flips for `blacklist_hours` after a proven bad sample
+        (≥ blacklist_min_trades trades, win rate below blacklist_max_winrate_pct
+        and net negative in our own journal).
+        """
+        now = now_ms()
+        self._blacklist = {s: t for s, t in self._blacklist.items() if t > now}
+        r = self.store.cfg.risk
+        if not getattr(r, "auto_blacklist_symbols", False):
+            return
+        with contextlib.suppress(Exception):
+            stats = await self.journal.symbol_stats(force=True)
+            for sym, a in stats.items():
+                if ST.blacklist_entry(trades=int(a.get("trades", 0)),
+                                      win_rate=float(a.get("win_rate", 100.0)),
+                                      net=float(a.get("net", 0.0)),
+                                      min_trades=int(r.blacklist_min_trades),
+                                      max_winrate=float(r.blacklist_max_winrate_pct)):
+                    until = now + int(float(r.blacklist_hours) * 3_600_000)
+                    if sym not in self._blacklist:
+                        self.log("warn", "risk-bot",
+                                 f"{sym}: auto-blacklisted for {r.blacklist_hours:.0f}h — "
+                                 f"{a.get('trades')} trades, {a.get('win_rate', 0):.0f}% win "
+                                 f"rate, net ${a.get('net', 0):,.2f}", topic="risk")
+                    self._blacklist[sym] = max(self._blacklist.get(sym, 0), until)
+
+    async def _btc_alignment(self, direction: str, symbol: str) -> bool | None:
+        """
+        Regime opinion from the market leader.  Returns None (= no opinion →
+        pass) when BTCUSDT is not in the store or its HTF gate is not warm, so
+        the filter can never trade on stale or absent context.
+        """
+        if symbol == "BTCUSDT":
+            return None
+        try:
+            series = await self._compute_series("BTCUSDT")
+        except Exception:
+            return None
+        if series is None:
+            return None
+        i = series.last
+        if not bool(series.htf_ready[i]):
+            return None
+        return ST.btc_regime_allows(int(series.trend[i]),
+                                    bool(series.htf_bull[i] == 1.0), direction)
+
     def _warn_htf_once(self, symbol: str) -> None:
         if getattr(self, "_htf_warned", False):
             return
@@ -797,6 +851,18 @@ class TradingEngine:
             return None                                  # gate not warm yet → skip
         if self.cooldowns.get(symbol, 0) > time.time():
             return None
+        until = self._blacklist.get(symbol)
+        if until and until > now_ms():
+            return None                                  # journal said so
+        # ── win-rate pack: confluence gates on top of the confirmed flip ──
+        btc_aligned = await self._btc_alignment(sig["direction"], symbol)
+        ok, gate_reason = ST.entry_gate(sig, self.store.cfg.risk,
+                                        mtf_gate_enabled=self.store.cfg.indicator.mtfGate,
+                                        btc_aligned=btc_aligned)
+        if not ok:
+            self.log("info", scanner_id, f"{symbol}: {sig['direction']} flip skipped — "
+                                         f"{gate_reason}", topic="scan")
+            return None
         return Opportunity(
             symbol=symbol, direction=sig["direction"], entry=sig["entry"],
             stop=sig["stop"], target=sig["target"], atr=sig["atr"],
@@ -810,6 +876,12 @@ class TradingEngine:
                 "rail_distance_pct": sig.get("rail_distance_pct", 0.0),
                 "flow_bias": float(sig.get("flow_bias", 0.0)),
                 "symbol": symbol, "direction": sig["direction"],
+                # win-rate-pack confluence (None = no opinion → neutral score)
+                "vol_surge": sig.get("vol_surge"),
+                "body_strength": sig.get("body_strength"),
+                "htf_ema_up": sig.get("htf_ema_up"),
+                "htf_ready": bool(sig.get("htf_ready", True)),
+                "btc_aligned": btc_aligned,
             })
 
     # =========================================================== stage 2: analysts
@@ -967,6 +1039,15 @@ class TradingEngine:
             return None
         if symbol in self.symbol_to_trade:
             return None
+        # ── correlation guard: ten long alts are one long BTC trade ───────
+        max_side = int(getattr(cfg.risk, "max_same_side_trades", 0) or 0)
+        if max_side > 0:
+            same_side = sum(1 for t in self.open_trades.values() if t.get("side") == side)
+            if same_side >= max_side:
+                self.log("info", "risk-bot",
+                         f"{symbol}: skipped — {same_side}/{max_side} slots already on the "
+                         f"{side} side (correlation guard)", topic="risk")
+                return None
         api = GOVERNOR.snapshot()
         if api["halted"]:
             self.log("warn", "api-guard-bot",
@@ -1289,6 +1370,23 @@ class TradingEngine:
         roi = roi_points(entry, mark, qty, margin, side)
         # the ROI trail protects a winner: it only ever tightens the single stop
         await self._trail_tick(trade, pos, mark, bot_id)
+        # ── win-rate pack: stall exit — a flip that never worked is a missed
+        #    thesis; release the margin instead of marrying it ──────────────
+        r = self.store.cfg.risk
+        if (r.stall_exit_minutes > 0 and trade["symbol"] not in self.pending_close
+                and ST.stall_exit_due(
+                    opened_at_ms=int(trade.get("opened_at") or 0), now_ms=now_ms(),
+                    entry=entry, peak_price=float(trade.get("peak_price") or entry),
+                    qty=qty, margin=margin, side=side,
+                    minutes=float(r.stall_exit_minutes),
+                    min_peak_roi=float(r.stall_min_roi_pct),
+                    roi_points_fn=roi_points)):
+            self.log("info", bot_id,
+                     f"{trade['symbol']}: stalled — {r.stall_exit_minutes:.0f} min without "
+                     f"reaching +{r.stall_min_roi_pct:.0f}% ROI peak, closing", topic="monitor")
+            await self._close_trade(int(trade["id"]), "stalled",
+                                    reason_detail="stall exit: the move never arrived")
+            return
         tp = float(trade.get("tp_price") or 0)
         sl = float(trade.get("sl_price") or 0)
         liq = pos.liquidation_price or float(trade.get("liquidation_price") or 0)
@@ -1337,8 +1435,7 @@ class TradingEngine:
         """
         cfg = self.store.cfg.risk
         enabled, activation, distance, min_step = cfg.trail()
-        if not enabled:
-            return
+        be_on, be_roi, be_buf = cfg.be_lock()
         symbol = trade["symbol"]
         side = trade["side"]
         entry = float(trade["entry_price"])
@@ -1348,6 +1445,8 @@ class TradingEngine:
             return
 
         # ── anchor the peak to the best mark we have seen ────────────────
+        #    (runs even when both protections are off — the stall monitor
+        #     needs a live peak, and one order path must own it)
         peak = float(trade.get("peak_price") or entry)
         new_peak = max(peak, mark) if side == "LONG" else min(peak, mark)
         if abs(new_peak - peak) > 0:
@@ -1356,11 +1455,25 @@ class TradingEngine:
                 await DB.update_trade(int(trade["id"]), {"peak_price": new_peak})
             peak = new_peak
 
+        if not enabled and not be_on:
+            return
+
         prev_stop = float(trade.get("sl_price") or 0.0)
-        stop, armed = trail_stop_price(
+        stop, armed = (trail_stop_price(
             entry=entry, side=side, peak_price=peak, mark=mark, qty=qty, margin=margin,
             prev_stop=prev_stop, activation_roi=activation, distance_roi=distance,
-            mark_gap_pct=cfg.trail_mark_gap_pct)
+            mark_gap_pct=cfg.trail_mark_gap_pct) if enabled else (prev_stop, False))
+        # win-rate pack: the break-even lock runs on the SAME order, earlier and
+        # lower than the trail — between +8 % and +25 % ROI it is the tighter move
+        via_be = False
+        if be_on:
+            be_stop, be_armed = breakeven_stop_price(
+                entry=entry, side=side, peak_price=peak, mark=mark, qty=qty, margin=margin,
+                prev_stop=prev_stop, activation_roi=be_roi, buffer_roi=be_buf,
+                mark_gap_pct=cfg.trail_mark_gap_pct)
+            if be_armed and (not armed or (side == "LONG" and be_stop > stop)
+                             or (side == "SHORT" and be_stop < stop)):
+                stop, armed, via_be = be_stop, True, True
         if not armed:
             return
 
@@ -1441,15 +1554,19 @@ class TradingEngine:
         with contextlib.suppress(Exception):
             await DB.update_trade(int(trade["id"]), {**patch, "notes": trade["notes"]})
         with contextlib.suppress(Exception):
-            await DB.add_trade_event(int(trade["id"]), "trail",
+            await DB.add_trade_event(int(trade["id"]),
+                                     "breakeven" if via_be else "trail",
                                      {"stop": stop, "peak": peak, "peak_roi": round(peak_roi, 3),
                                       "locked_roi": round(locked_roi, 3),
                                       "armed": armed_now})
-        icon = "🔒" if armed_now else "⤴"
+        icon = "🛡" if via_be else ("🔒" if armed_now else "⤴")
+        move = ("break-even lock armed" if via_be
+                else f"ROI trail {'armed' if armed_now else 'raised'}")
+        rule = (f"rule: arm {be_roi:.0f}%, lock {be_buf:.0f} pts" if via_be
+                else f"rule: arm {activation:.0f}%, trail {distance:.0f} pts")
         self.log("success", bot_id or "monitor-team",
-                 f"{symbol}: {icon} ROI trail {'armed' if armed_now else 'raised'} — peak "
-                 f"+{peak_roi:.1f}% ROI, stop {stop:.8g} locks +{locked_roi:.1f}% ROI "
-                 f"(rule: arm {activation:.0f}%, trail {distance:.0f} pts)",
+                 f"{symbol}: {icon} {move} — peak +{peak_roi:.1f}% ROI, "
+                 f"stop {stop:.8g} locks +{locked_roi:.1f}% ROI ({rule})",
                  {"trade_id": trade["id"], "stop": stop, "peak": peak,
                   "peak_roi": round(peak_roi, 3), "locked_roi": round(locked_roi, 3)},
                  topic="monitor")
@@ -1654,7 +1771,21 @@ class TradingEngine:
         trade.update(patch)
         self.open_trades.pop(trade_id, None)
         self.symbol_to_trade.pop(symbol, None)
-        self.cooldowns[symbol] = time.time() + SYMBOL_COOLDOWN_S
+        # ── win-rate pack: repeat losers wait longer per retry (anti-tilt) ──
+        risk_cfg = self.store.cfg.risk
+        streak = self.loss_streaks.get(symbol, 0)
+        if net < 0:
+            streak += 1
+        elif net > 0:
+            streak = 0
+        self.loss_streaks[symbol] = streak
+        cool = (ST.loss_streak_cooldown_s(streak, SYMBOL_COOLDOWN_S)
+                if getattr(risk_cfg, "loss_streak_cooldown", False) else SYMBOL_COOLDOWN_S)
+        self.cooldowns[symbol] = time.time() + cool
+        if streak >= 2:
+            self.log("info", "trade-manager-bot",
+                     f"{symbol}: loss streak {streak} — re-entry cooldown extended to "
+                     f"{cool:.0f}s", topic="journal")
         self.symbol_monitor.pop(symbol, None)
         self.series_cache.pop(symbol, None)
 

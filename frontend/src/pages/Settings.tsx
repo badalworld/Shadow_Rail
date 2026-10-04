@@ -393,6 +393,68 @@ export const Settings: React.FC = () => {
                   </div>
                 </div>
 
+                <div className="glass-solid p-3">
+                  <div className="mb-2 text-[0.6rem] uppercase tracking-wider dim">
+                    win-rate pack · entry confluence
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                    <Check label="flip-bar volume ≥ ratio × 20-bar average"
+                      checked={cfg.risk.require_volume_confirm ?? true}
+                      onChange={(v) => patch('risk', 'require_volume_confirm', v)} />
+                    <Num label="Volume confirm (× avg)" value={cfg.risk.vol_confirm_ratio ?? 0.9}
+                      step={0.1} onChange={(v) => patch('risk', 'vol_confirm_ratio', v)} />
+                    <Check label="flip bar closes committed (body of range ≥ min)"
+                      checked={cfg.risk.require_body_confirm ?? true}
+                      onChange={(v) => patch('risk', 'require_body_confirm', v)} />
+                    <Num label="Min body of bar (0–1)" value={cfg.risk.body_min ?? 0.3}
+                      step={0.05} onChange={(v) => patch('risk', 'body_min', v)} />
+                    <Check label="1h EMA-50 slope agrees with the flip"
+                      checked={cfg.risk.require_htf_slope ?? true}
+                      onChange={(v) => patch('risk', 'require_htf_slope', v)} />
+                    <Check label="ATR% must sit inside the tradeable band"
+                      checked={cfg.risk.require_volatility_band ?? true}
+                      onChange={(v) => patch('risk', 'require_volatility_band', v)} />
+                    <Num label="ATR floor (%)" value={cfg.risk.atr_floor_pct ?? 0.3}
+                      step={0.05} onChange={(v) => patch('risk', 'atr_floor_pct', v)} />
+                    <Num label="ATR cap (%)" value={cfg.risk.atr_cap_pct ?? 1.8}
+                      step={0.1} onChange={(v) => patch('risk', 'atr_cap_pct', v)} />
+                    <Check label="never chase: cap the distance from the shadow rail"
+                      checked={cfg.risk.enforce_rail_extension ?? true}
+                      onChange={(v) => patch('risk', 'enforce_rail_extension', v)} />
+                    <Num label="Max rail extension (%)" value={cfg.risk.max_rail_extension_pct ?? 3}
+                      step={0.5} onChange={(v) => patch('risk', 'max_rail_extension_pct', v)} />
+                    <Check label="skip alt flips against a clearly opposite BTCUSDT"
+                      checked={cfg.risk.require_btc_alignment ?? true}
+                      onChange={(v) => patch('risk', 'require_btc_alignment', v)} />
+                  </div>
+                </div>
+
+                <div className="glass-solid p-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-[0.6rem] uppercase tracking-wider dim">
+                      win-rate pack · trade management
+                    </div>
+                    <Check label="break-even lock on the same stop order"
+                      checked={cfg.risk.be_lock_enabled ?? true}
+                      onChange={(v) => patch('risk', 'be_lock_enabled', v)} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                    <Num label="Break-even arms at ROI %" value={cfg.risk.be_lock_roi_pct ?? 8}
+                      step={1} onChange={(v) => patch('risk', 'be_lock_roi_pct', v)} />
+                    <Num label="Locked profit (ROI pts)" value={cfg.risk.be_buffer_roi_pct ?? 1.5}
+                      step={0.5} onChange={(v) => patch('risk', 'be_buffer_roi_pct', v)} />
+                    <Num label="Stall exit (min, 0 = off)" value={cfg.risk.stall_exit_minutes ?? 90}
+                      step={10} onChange={(v) => patch('risk', 'stall_exit_minutes', v)} />
+                    <Num label="Stall: min peak ROI %" value={cfg.risk.stall_min_roi_pct ?? 2}
+                      step={0.5} onChange={(v) => patch('risk', 'stall_min_roi_pct', v)} />
+                  </div>
+                  <div className="mono mt-2 text-[0.62rem] dim">
+                    The lock runs below the ROI trail on the ONE stop order: a +8 % peak ROI moves
+                    the stop to break-even +1.5 — losers become scratches. Flips that never touch
+                    the min peak ROI close on schedule instead of bleeding fees.
+                  </div>
+                </div>
+
                 <div className="glass-solid p-3 text-[0.68rem]">
                   <div className="mb-1 text-[0.6rem] uppercase tracking-wider dim">active system (live)</div>
                   <div className="accent-text">{activeSystem?.risk_mode?.replace(/_/g, ' ')}</div>
@@ -436,6 +498,17 @@ export const Settings: React.FC = () => {
                   onChange={(v) => patch('risk', 'max_stop_distance_pct', v)} />
                 <Num label="Daily drawdown stop (%) 0 = off" value={cfg.risk.daily_drawdown_stop_pct} step={1}
                   onChange={(v) => patch('risk', 'daily_drawdown_stop_pct', v)} />
+                <Num label="Max trades on one side (0 = off)" value={cfg.risk.max_same_side_trades ?? 6} step={1}
+                  onChange={(v) => patch('risk', 'max_same_side_trades', v)} />
+                <Check label="confidence sizing (A+ → ×1.15, borderline → ×0.8)"
+                  checked={cfg.risk.confidence_sizing ?? true}
+                  onChange={(v) => patch('risk', 'confidence_sizing', v)} />
+                <Check label="loss-streak cooldowns (2× / 3× / 4× waits per symbol)"
+                  checked={cfg.risk.loss_streak_cooldown ?? true}
+                  onChange={(v) => patch('risk', 'loss_streak_cooldown', v)} />
+                <Check label="auto-blacklist symbols with a proven losing book"
+                  checked={cfg.risk.auto_blacklist_symbols ?? true}
+                  onChange={(v) => patch('risk', 'auto_blacklist_symbols', v)} />
               </div>
               <div className="glass-solid mt-3 p-3 text-[0.68rem] leading-relaxed dim">
                 <div className="mb-1 text-[0.62rem] uppercase tracking-wider">enforced by the AEGIS risk bot</div>
@@ -707,5 +780,14 @@ const Num: React.FC<{
       onChange={(e) => onChange(Number(e.target.value))}
       className="mono rounded-xl border bg-transparent px-3 py-2 text-[0.78rem] outline-none"
       style={{ borderColor: 'var(--sr-border)' }} />
+  </label>
+)
+
+const Check: React.FC<{
+  label: string; checked: boolean; onChange: (v: boolean) => void
+}> = ({ label, checked, onChange }) => (
+  <label className="flex items-center gap-2 text-[0.72rem]">
+    <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+    {label}
   </label>
 )

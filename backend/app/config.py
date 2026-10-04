@@ -157,11 +157,49 @@ class RiskSettings(BaseModel):
     size_pct_per_trade: float = 8.0      # % of equity used as margin
     max_concurrent_trades: int = 10
     max_margin_utilization_pct: float = 100.0
-    min_confidence: float = 60.0
+    min_confidence: float = 65.0         # win-rate pack: A-grade setups only
     liq_safety_buffer_pct: float = 35.0  # stop kept <= 65% of the way to liq
     max_stop_distance_pct: float = 8.0   # sanity cap (reject beyond this)
-    daily_drawdown_stop_pct: float = 0.0  # 0 = disabled
+    daily_drawdown_stop_pct: float = 6.0  # circuit breaker: stop entering after
+                                          #  −6 % on the day (0 = disabled)
     min_notional_override: float = 0.0
+
+    # ── win-rate pack: entry confluence gates (Settings → Risk / TP-SL) ──
+    # A confirmed flip only gets money when the *context* agrees as well.
+    # Each gate is independent and can be turned off; they fail open when the
+    # underlying measurement is unavailable (warm-up), never fabricate a reject.
+    require_volume_confirm: bool = True   # flip bar volume ≥ ratio × SMA20
+    vol_confirm_ratio: float = 0.9
+    require_body_confirm: bool = True     # close committed to the move, not indecision
+    body_min: float = 0.30                # ≥ 30 % of the bar range in trade direction
+    require_htf_slope: bool = True        # 1h EMA-50 must not point against the flip
+    require_volatility_band: bool = True  # ATR% must sit in the tradeable middle
+    atr_floor_pct: float = 0.30
+    atr_cap_pct: float = 1.80
+    enforce_rail_extension: bool = True   # never chase an extended move…
+    max_rail_extension_pct: float = 3.0   # …more than this from the shadow rail
+    require_btc_alignment: bool = True    # skip alt flips against a clearly opposite BTC
+
+    # ── win-rate pack: trade management ──────────────────────────────────
+    # Break-even lock runs *before* the ROI trail on the same single stop order:
+    # once a position earns be_lock_roi_pct, the stop jumps to entry + buffer —
+    # losers become scratches, which is the cheapest win-rate there is.
+    be_lock_enabled: bool = True
+    be_lock_roi_pct: float = 8.0          # arm at +8 % ROI …
+    be_buffer_roi_pct: float = 1.5        # … lock +1.5 % ROI (covers taker round trip)
+    stall_exit_minutes: float = 90.0      # a trade that never worked dies (0 = off)
+    stall_min_roi_pct: float = 2.0        # “worked” = peak ROI above this
+    max_same_side_trades: int = 6         # cap correlated exposure (0 = off)
+    confidence_sizing: bool = True        # A-grade size up, borderline size down
+    loss_streak_cooldown: bool = True     # repeat losers wait 2×/3×/4× longer
+    auto_blacklist_symbols: bool = True   # journal-driven leper colony
+    blacklist_min_trades: int = 8
+    blacklist_max_winrate_pct: float = 30.0
+    blacklist_hours: float = 24.0
+
+    def be_lock(self) -> tuple[bool, float, float]:
+        """(enabled, activation ROI %, locked buffer ROI pts)."""
+        return (self.be_lock_enabled, self.be_lock_roi_pct, self.be_buffer_roi_pct)
 
     def trail(self) -> tuple[bool, float, float, float]:
         """(enabled, activation ROI %, distance ROI pts, min step ROI pts)."""

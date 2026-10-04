@@ -112,6 +112,7 @@ async def _protective_orders(eng):
 async def test_the_trail_moves_the_single_stop_order_on_the_venue(db, store):
     eng = await make_engine(store, universe=12)
     store.cfg.risk.trail_min_step_roi_pct = 0.0      # every tick may ratchet
+    store.cfg.risk.be_lock_enabled = False           # isolate the trail's arming
     store.save()
     trade = await _open(eng)
     assert trade
@@ -183,6 +184,7 @@ async def test_the_trail_stop_closes_the_trade_and_is_labelled_trail(db, store):
 async def test_trail_is_disabled_when_the_operator_turns_it_off(db, store):
     eng = await make_engine(store, universe=12)
     store.cfg.risk.trail_roi_enabled = False
+    store.cfg.risk.be_lock_enabled = False           # off means off — both of them
     store.save()
     trade = await _open(eng)
     step = roi_price_step(float(trade["margin"]), float(trade["qty"]))

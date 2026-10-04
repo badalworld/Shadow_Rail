@@ -1,5 +1,5 @@
 """
-Market Analyst confidence model.
+Market Analyst confidence model (v2 — win-rate pack).
 
 The 10 analyst bots score every scanner opportunity 0–100 using a transparent,
 auditable blend of structural factors — with an optional online logistic model
@@ -7,15 +7,25 @@ that learns from the engine's own closed-trade journal (enabled automatically
 once there is enough history, or forced on/off in Settings).
 
 Factors (weights sum to 1.0):
-   trend_quality   0.28  — Shadow Rail cleanRatio (dirMove / wanderMove)
-   htf_alignment   0.18  — 1h EMA-50 regime agreement with the flip
-   volume_flow     0.14  — normalised volume flow bias in the trade direction
-   volatility_fit  0.12  — ATR% inside the profitable band (not dead, not insane)
-   rail_position   0.11  — distance from the shadow rail (not chasing an extended move)
-   signal_tier     0.09  — "strong" flips (cleanRatio ≥ 0.60)
+   trend_quality   0.21  — Shadow Rail cleanRatio (dirMove / wanderMove)
+   htf_alignment   0.13  — 1h EMA-50 regime agreement with the flip
+   htf_momentum    0.09  — 1h EMA-50 *slope* agrees too (not just position)
+   volume_flow     0.09  — normalised volume flow bias in the trade direction
+   candle_confirm  0.09  — flip-bar participation (volume surge) + commitment
+   volatility_fit  0.09  — ATR% inside the profitable band (not dead, not insane)
+   rail_position   0.08  — distance from the shadow rail (not chasing an extended move)
+   market_regime   0.08  — BTCUSDT regime agreement for alt flips
+   signal_tier     0.06  — "strong" flips (cleanRatio ≥ 0.60)
    symbol_history  0.08  — realised win-rate of this symbol in our own journal
 
 Every factor is returned with the score so the dashboard can show *why*.
+Confluence factors fall back to a neutral 60 when their measurement is
+unavailable (warm-up / simulator), so missing data can neither fake quality
+nor veto an otherwise A-grade setup.
+
+Learning loop: the logistic model is trained on the *scored factor rows* the
+journal stores with every trade (`notes.factors`) — the same 0–100 vectors the
+scorer produces — so what is learned is exactly what is scored.
 """
 from __future__ import annotations
 
@@ -28,17 +38,23 @@ from typing import Any
 import numpy as np
 
 WEIGHTS = {
-    "trend_quality": 0.28,
-    "htf_alignment": 0.18,
-    "volume_flow": 0.14,
-    "volatility_fit": 0.12,
-    "rail_position": 0.11,
-    "signal_tier": 0.09,
+    "trend_quality": 0.21,
+    "htf_alignment": 0.13,
+    "htf_momentum": 0.09,
+    "volume_flow": 0.09,
+    "candle_confirm": 0.09,
+    "volatility_fit": 0.09,
+    "rail_position": 0.08,
+    "market_regime": 0.08,
+    "signal_tier": 0.06,
     "symbol_history": 0.08,
 }
+MODEL_FORMAT = 2      # bump when the factor set changes; stale models are dropped
+
+NEUTRAL = 60.0        # score for a factor whose input is missing
 
 # ATR% band that historically favours a 5m flip system
-VOL_SWEET_LO = 0.25     # % of price
+VOL_SWEET_LO = 0.30     # % of price
 VOL_SWEET_HI = 1.80
 
 
@@ -83,6 +99,12 @@ class ConfidenceModel:
         try:
             with open(self.model_path, "r") as fh:
                 data = json.load(fh)
+            # a model trained on a different factor set must never be reused —
+            # its coefficients would silently score the wrong features
+            if int(data.get("format", 1)) != MODEL_FORMAT \
+                    or list(data.get("keys", [])) != list(WEIGHTS.keys()):
+                self.coef, self.intercept, self.samples = None, 0.0, 0
+                return
             self.coef = np.asarray(data.get("coef", []), dtype=float)
             self.intercept = float(data.get("intercept", 0.0))
             self.samples = int(data.get("samples", 0))
@@ -92,18 +114,24 @@ class ConfidenceModel:
 
     def train(self, rows: list[dict]) -> dict[str, Any]:
         """
-        rows: [{'features': {…}, 'win': 0/1}, …] from the closed-trade journal.
-        Plain gradient-descent logistic regression — no external deps, and the
-        coefficients are saved so the dashboard can display them.
+        rows: [{'factors': {name: 0..100}, 'win': 0/1}, …] from the closed-trade
+        journal ('features' accepted for legacy rows).  Plain gradient-descent
+        logistic regression — no external deps, and the coefficients are saved
+        so the dashboard can display them.
         """
-        usable = [r for r in rows if r.get("features")]
+        def row_vector(r: dict) -> list[float]:
+            src = r.get("factors") or r.get("features") or {}
+            return [min(1.0, max(0.0, float(src.get(k, NEUTRAL)) / 100.0))
+                    for k in WEIGHTS]
+
+        usable = [r for r in rows if (r.get("factors") or r.get("features"))]
         self.samples = len(usable)
         if len(usable) < 60:
             self.coef = None
             return {"trained": False, "samples": self.samples,
                     "reason": "need at least 60 closed trades"}
         keys = list(WEIGHTS.keys())
-        X = np.asarray([[float(r["features"].get(k, 0.0)) / 100.0 for k in keys] for r in usable])
+        X = np.asarray([row_vector(r) for r in usable])
         y = np.asarray([1.0 if r.get("win") else 0.0 for r in usable])
         w = np.zeros(len(keys))
         b = 0.0
@@ -121,7 +149,7 @@ class ConfidenceModel:
             os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
             with open(self.model_path, "w") as fh:
                 json.dump({"coef": w.tolist(), "intercept": b, "samples": self.samples,
-                           "keys": keys}, fh, indent=2)
+                           "keys": keys, "format": MODEL_FORMAT}, fh, indent=2)
         except OSError:
             pass
         acc = float(np.mean((p > 0.5) == (y > 0.5)))
@@ -146,9 +174,30 @@ class ConfidenceModel:
         if not aligned:
             notes.append("counter-trend vs 1h EMA-50 (HTF gate should have filtered)")
 
+        # HTF slope confluence: the 1h tide should be *moving* our way
+        up = feature.get("htf_ema_up")
+        if up is None or not feature.get("htf_ready", True):
+            f["htf_momentum"] = NEUTRAL
+        else:
+            want_up = direction == "LONG"
+            f["htf_momentum"] = 100.0 if bool(up) == want_up else 15.0
+            if bool(up) != want_up:
+                notes.append("1h EMA-50 slope points against the flip")
+
         bias = float(feature.get("flow_bias") or 0.0)            # -1..1
         flow_dir = bias if direction == "LONG" else -bias
         f["volume_flow"] = min(100.0, max(0.0, 50.0 + flow_dir * 50.0))
+
+        # flip-bar participation + commitment (the two cheapest fake-out filters)
+        parts: list[float] = []
+        vs = feature.get("vol_surge")
+        if vs is not None:
+            parts.append(min(100.0, max(0.0, 40.0 + (float(vs) - 0.8) * 75.0)))
+        body = feature.get("body_strength")
+        if body is not None:
+            signed = float(body) * (1.0 if direction == "LONG" else -1.0)
+            parts.append(min(100.0, max(0.0, signed / 0.6 * 100.0)))
+        f["candle_confirm"] = sum(parts) / len(parts) if parts else NEUTRAL
 
         atr_pct = float(feature.get("atr_pct") or 0.0)
         f["volatility_fit"] = 100.0 * _band_score(atr_pct, VOL_SWEET_LO, VOL_SWEET_HI)
@@ -161,6 +210,12 @@ class ConfidenceModel:
                                       max(0.0, 1.0 - (rail_dist - 1.5) / 2.5))
 
         f["signal_tier"] = 100.0 if feature.get("tier") == "strong" else 60.0
+
+        # market regime (leader coin) — None means "no opinion"
+        btc = feature.get("btc_aligned")
+        f["market_regime"] = NEUTRAL if btc is None else (100.0 if btc else 25.0)
+        if btc is False:
+            notes.append("BTCUSDT regime runs against this alt flip")
 
         hist = 50.0
         if symbol_stats and symbol_stats.get("trades", 0) >= 3:

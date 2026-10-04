@@ -37,6 +37,46 @@ attributes each call to the bot that made it.
 * The stop is **always clamped between entry and liquidation** (35 % safety buffer by default).
 * **Max 10 concurrent trades**, one position per symbol, 8 % margin each at 10× cross.
 
+### The win-rate pack (strategy v2)
+
+A confirmed flip is necessary, not sufficient — the upgrade adds six **entry
+confluence gates** (each individually switchable in **Settings → Risk / TP-SL**,
+each *fail-open* while its measurement warms up, every rejection logged with its
+reason so the scanner is never a black box):
+
+| Gate | Rule | Why it raises win rate |
+|---|---|---|
+| Volume confirm | flip bar volume ≥ 0.9× the 20-bar average | flips without participation are usually fake-outs |
+| Body commitment | close ≥ 30 % of the bar range **in trade direction** | doji/indecision flips whipsaw |
+| HTF slope | the 1h EMA-50 must not point against the flip | an exhaustion cross *into* a falling tide |
+| Volatility band | ATR% within 0.30–1.80 of price | stops need room; TP needs reachability |
+| No chasing | entry ≤ 3 % beyond the shadow rail | late entries are mean-reversion food |
+| BTC regime | skip alt flips when BTCUSDT is firmly opposite | ten long alts are one long BTC trade |
+
+…plus four **trade-management upgrades**:
+
+* **Break-even lock** — at +8 % peak ROI the *same single stop order* jumps to
+  entry +1.5 ROI-points (covers the taker round trip). A trade that stalls and
+  reverses leaves a scratch booked as a win — the cheapest win-rate there is.
+  It runs underneath the ROI trail and inherits every trail law: only ever
+  tightens, never a second order, never past liquidation, never a losing side.
+* **Stall exit** — a position that has not seen +2 % peak ROI after 90 minutes
+  closes on its own schedule (the thesis missed; the margin is needed elsewhere).
+* **Journal learning, fixed** — the logistic model now trains on the analysts'
+  *scored factor vectors* (it previously trained on mismatched raw signal keys,
+  which neutralised it); models saved from the older 7-factor space are rejected
+  on load instead of scoring the wrong features.
+* **Anti-tilt controls** — repeat-losing symbols (≥ 8 trades, < 30 % win rate,
+  net negative) auto-blacklist for 24 h; a symbol's re-entry cooldown doubles,
+  triples, quadruples with each consecutive loss; same-side exposure is capped
+  (default 6 of 10); margin is conviction-weighted (≥ 90 score → ×1.15,
+  borderline → ×0.8); entries stop for the day after −6 % equity; and the
+  execute-threshold moved from 60 to **65 confidence**.
+
+> These changes maximize *edge per trade*, not trade count — expect fewer,
+> better entries. Nothing here guarantees profit; run the bench below on real
+> history, then paper-trade, before sizing up.
+
 ### ROI trailing stop (never give a winner back)
 
 Once a position's **ROI reaches +25 %** (ROI = unrealised P&L ÷ margin, leverage-adjusted, exactly
@@ -87,6 +127,13 @@ secret, press **Test connection**, then add the displayed IP to your Binance key
 # tests (indicator port, risk maths, API governor, journal, full engine flow)
 cd backend && ../.venv/bin/python -m pytest -q
 
+# A/B the strategy on data (repo root) — same gate/scorer/risk code as the live engine
+#   sim      = deterministic synthetic momentum market (works offline)
+#   binance  = real USDT-M 5m klines via the public endpoint (no keys needed)
+.venv/bin/python scripts/backtest.py --source sim --bars 3600
+.venv/bin/python scripts/backtest.py --source binance --days 45 \
+  --symbols BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,LINKUSDT
+
 # render every dashboard page against the live API (catches payload drift)
 cd frontend && node scripts/ssr-smoke.mjs capture && node scripts/ssr-smoke.mjs
 
@@ -120,7 +167,9 @@ backend/
     engine.py         the CEO workflow state machine (scan→analyse→execute→verify→monitor)
     bots.py           the 29-bot roster, ranks, promotions, moods, workflow graph
     risk.py           sizing, liquidation-safe stops, the one-system TP/SL rule
-    confidence.py     analyst scoring (7 factors + logistic model trained on your journal)
+    strategy.py       the win-rate pack: confluence gates, break-even lock,
+                      stall exit, conviction sizing, anti-tilt (pure, tested)
+    confidence.py     analyst scoring (10 factors + logistic model trained on your journal)
     journal.py        Trade Manager + Equity Manager (locked starting balance!)
     ratelimit.py      API Weight Governor — the 95 % ceiling
     db.py             SQLite persistence (trades, events, equity curve, logs, kv)
@@ -131,7 +180,7 @@ backend/
       binance.py      USDT-M REST + websockets (orders, protection, user stream)
       sim.py          simulation exchange (offline demo & rehearsal)
       hub.py          MarketHub — candles, universe ranking, scanner allocation, health
-  tests/              98 tests covering every safety-critical rule
+  tests/              134 tests covering every safety-critical rule
 frontend/             React + TypeScript + Tailwind + three.js dashboard
   src/components/hq/  the 3D headquarters: layout (floor plan + cast), furniture,
                       Human (the rigged body), HQ (room, camera, live boards),
