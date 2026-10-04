@@ -219,13 +219,18 @@ def test_websocket_hello_frame_and_live_relay(client):
         # an action taken through the UI must arrive on the socket
         assert client.post("/api/bots/scanner-1/promote").status_code == 200
         seen = []
-        for _ in range(8):
+        # The relay is a live firehose — the simulator ticks 150 symbols at 3000x, so
+        # the promotion frame queues behind an unpredictable number of market ticks.
+        # Drain with a wall-clock budget instead of assuming it lands in the first few
+        # frames (a fixed count flakes whenever the host is loaded).
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and len(seen) < 2000:
             frame = ws.receive_json()
             seen.append(frame["topic"])
             if frame["topic"] == "bot.promoted":
                 assert "name" in frame["data"] and "to" in frame["data"]
                 break
-        assert "bot.promoted" in seen, f"promotion never reached the socket: {seen}"
+        assert "bot.promoted" in seen, f"promotion never reached the socket: {seen[-12:]}"
 
 
 def test_settings_save_keeps_the_office_record(client):

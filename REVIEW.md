@@ -16,8 +16,8 @@ is enforced in code *and* observable on a live run: one TP/SL system per positio
 stop always inside liquidation, the ROI trail that only ever tightens, the 95 % API
 ceiling, the 29-bot office, the equity identity and the journal ↔ venue ledger check.
 
-The review found **nine issues** (1 medium, 4 low, 4 dead-code/robustness), all fixed on
-this branch with regression tests where the behaviour was measurable.  None of them
+The review found **ten issues** (1 medium, 4 low, 4 dead-code/robustness, 1 flaky test),
+all fixed on this branch with regression tests where the behaviour was measurable.  None of them
 changed strategy semantics — they are accounting, task-lifetime, hot-reload and display
 correctness fixes.  The one thing that is *not* a code defect but is worth the operator's
 attention is the strategy economics of the current simulator window
@@ -80,7 +80,7 @@ tolerance · office rules · 150 priced scan rows.
 | **F4** | Low | **Stale realised P&L after a close.** The equity sheet is refreshed by a 5 s loop, so for up to one tick the Account page could show the previous realised P&L next to a trade the history page already listed. | `engine._equity_wake` — the close path rings the bell and the equity loop re-reads the account immediately (event with a 5 s floor). |
 | **F5** | Low | **Positions table used the journalled liquidation estimate** instead of the venue's live figure the API already ships as `liquidation_live`. | `frontend/src/pages/Positions.tsx` prefers `liquidation_live ?? liquidation_price` for both the colour warning and the cell. |
 
-### 4.2 Dead code / clarity (no behaviour change)
+### 4.2 Dead code, clarity and test robustness (no production behaviour change)
 
 | # | Finding | Fix |
 |---|---|---|
@@ -88,6 +88,7 @@ tolerance · office rules · 150 priced scan rows.
 | **F7** | `indicators/pine.py::_seeded_ma` carried a `seed` parameter and a "first sample" branch that no caller could reach (`ema`/`rma` both seed with the SMA). | parameter and branch removed; the Pine semantics are unchanged and every indicator test still passes |
 | **F8** | `config.py::update()` had an unreachable "tolerate a key we do not model" branch (the key set was derived from the same dump it was checked against). | simplified; unknown fields are still reported by `unknown_keys()` and never written |
 | **F9** | `pine.highest/stdev/crossover/linreg` and `util.true_range` remain as tested primitives the engine does not call. | kept deliberately (they are the Pine parity surface used by the indicator tests); noted here so a future audit does not flag them as orphans |
+| **F10** | `test_websocket_hello_frame_and_live_relay` scanned a fixed 8 websocket frames for the `bot.promoted` event. The relay is a firehose — 150 symbols ticking at 3000× — so a loaded host queues more than 8 `market.tick` frames ahead of the event and the test flakes (~1 run in 4 observed under load, 0 in 3 clean runs). | the drain now runs to a 10 s wall-clock budget (capped at 2000 frames), so it is deterministic regardless of tick volume; verified by repeated runs |
 
 ### 4.3 Reviewed and found sound
 
